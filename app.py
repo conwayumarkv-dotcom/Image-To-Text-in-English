@@ -6,7 +6,7 @@ import time
 import re
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError, ClientError, ServerError # 💡 503 에러 방어를 위해 ServerError 추가
+from google.genai.errors import APIError, ClientError, ServerError
 
 # 1. 페이지 기본 설정 및 디자인
 st.set_page_config(
@@ -100,6 +100,7 @@ try:
         if st.button("Word 파일로 변환하기 ✨"):
             
             doc = Document()
+            # 본문 기본 스타일 지정
             style = doc.styles['Normal']
             style.font.name = 'Arial'
             style.font.size = Pt(11)
@@ -118,19 +119,19 @@ try:
             for idx, file in enumerate(uploaded_files):
                 image_bytes = file.read()
                 
+                # 본문 내부 과도한 볼드 형성을 막기 위해 프롬프트 정밀 정제
                 prompt = """
                 이 사진 속의 영어 지문 텍스트를 정확하게 추출해줘.
-                - 사진의 메인 제목이나 소제목이 있다면 텍스트 제일 앞에 '[HEADING]' 이라는 태그를 붙여줘.
-                - 대화 내용(Dialogue) 구조인 경우, 대화의 주체를 나타내는 이름 뒤에 콜론(:)을 붙이고, 이름 앞에 '[NAME]' 태그를 붙여줘. (예: [NAME] Mike: Hey, guys!)
-                - 일반 본문 문장은 아무 태그 없이 문맥에 맞게 가독성 높은 단락으로 나누어줘.
-                - 원본에서 **진하게** 처리된 강조 키워드가 있다면 마크다운 기호(**)를 유지해줘.
+                - 사진의 메인 제목이나 'Participating in the Plot'과 같은 소제목이 있다면 텍스트 제일 앞에 '[HEADING]' 이라는 태그를 붙여줘. (예: [HEADING] Participating in the Plot)
+                - 대화 내용 구조인 경우에만, 대화 주체 이름 뒤에 콜론(:)을 붙이고 이름 앞에 '[NAME]' 태그를 붙여줘. (예: [NAME] Mike: Hey, guys!)
+                - 일반 본문 내용(지문 문장들)은 무조건 아무런 마크다운 태그(**)나 설명 없이 순수한 텍스트 서체로만 출력해줘. 본문 단어에 임의로 진하게 설정을 넣지 마.
                 - 결과물은 오직 추출된 텍스트만 보여주고, 다른 부연 설명은 하지 마.
                 """
                 
                 status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 지문을 AI 서버에서 분석하는 중...")
                 
                 extracted_text = ""
-                max_retries = 3  # 503 이나 429 에러 시 최대 3번까지 끈질기게 다시 시도
+                max_retries = 3  
                 
                 for attempt in range(max_retries):
                     try:
@@ -139,32 +140,25 @@ try:
                             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.type), prompt]
                         )
                         extracted_text = response.text
-                        break  # 성공 시 재시도 루프 탈출
+                        break  
                         
                     except (APIError, ClientError, ServerError) as e:
-                        # 429 한도초과 또는 503 서버 혼잡 에러가 발생한 경우 감지
                         error_str = str(e).upper()
-                        
-                        # 만약 진짜 하루치 용량(20장)이 완전히 다 끝난 거라면 루프 폭파 (낙하산 작동)
                         if "LIMIT: 20" in error_str:
                             quota_blocked = True
                             break
                             
-                        # 그 외 일시적 트래픽 과부하(503, 일반 429)는 친절하게 대기 연출 작동
                         if attempt < max_retries - 1:
                             for remaining in range(8, 0, -1):
                                 status_text.text(f"⏳ 처리하는데 시간이 걸리니 조금만 기다려주세요.. ({remaining}초)")
                                 time.sleep(1)
                         else:
-                            # 3번 다 실패한 경우에만 예외를 기록하고 다음 사진으로 이동
-                            st.error(f"❌ '{file.name}' 구글 서버 일시 지연으로 실패 (나중에 다시 시도해 주세요)")
+                            st.error(f"❌ '{file.name}' 구글 서버 일시 지연으로 실패")
                             
-                # 하루 제한 마감 낙하산이 펼쳐졌다면 파일 순회 즉시 탈출
                 if quota_blocked:
                     st.warning("⚠️ 오늘 사용 가능한 구글 무료 한도(하루 20장)를 모두 소진했습니다. 현재까지 변환 성공한 지문들로만 워드 문서를 저장합니다.")
                     break
 
-                # 텍스트 추출에 성공한 경우 워드 조립 및 게이지 처리
                 if extracted_text:
                     success_count += 1
                     target_percent = int(((idx + 1) / total_files) * 100)
@@ -179,8 +173,12 @@ try:
                     current_percent = target_percent
                     status_text.text(f"✅ [{idx+1}/{total_files}] 정제 완료!")
                     
-                    # 워드 문서 작성
-                    doc.add_heading(f"Source: {file.name}", level=3)
+                    # 각 사진 출처 표기 (본문 서식 유지)
+                    p_src = doc.add_paragraph()
+                    r_src = p_src.add_run(f"▪ Source: {file.name}")
+                    r_src.font.size = Pt(10)
+                    r_src.font.color.rgb = types.RGBColor(128, 128, 128) if 'types' in locals() else None # 회색 서식
+                    
                     paragraphs = extracted_text.split('\n')
                     for para_text in paragraphs:
                         clean_text = para_text.strip()
@@ -189,12 +187,16 @@ try:
                         
                         p_tag = doc.add_paragraph()
                         
+                        # 스타일링 1: 소제목/제목 구조 처리 (본문보다 살짝만 크고 이쁘게 볼드)
                         if clean_text.startswith("[HEADING]"):
                             heading_content = clean_text.replace("[HEADING]", "").strip()
                             run = p_tag.add_run(heading_content)
                             run.bold = True
-                            run.font.size = Pt(14)
+                            run.font.size = Pt(13) # 💡 기존 큰 대형 헤딩 서식을 버리고 본문(11pt)보다 살짝 큰 13pt 지정
+                            p_tag.paragraph_format.space_before = Pt(12) # 위쪽 여백 살짝 배치
+                            p_tag.paragraph_format.space_after = Pt(6)   # 아래쪽 여백
                             
+                        # 스타일링 2: 대화문 주체 구조 처리
                         elif clean_text.startswith("[NAME]"):
                             name_content = clean_text.replace("[NAME]", "").strip()
                             match = re.match(r"^([^:]+:)(.*)$", name_content)
@@ -206,16 +208,15 @@ try:
                                 p_tag.add_run(dialogue_part)
                             else:
                                 p_tag.add_run(name_content)
+                                
+                        # 스타일링 3: 일반 본문 문장 구조 처리 (불필요한 자동 볼드 전면 해제)
                         else:
-                            parts = clean_text.split('**')
-                            for i, part in enumerate(parts):
-                                run = p_tag.add_run(part)
-                                if i % 2 == 1:
-                                    run.bold = True
+                            # 엠베디드된 볼드 제거 후 깔끔한 일반 텍스트 바인딩
+                            plain_content = clean_text.replace("**", "")
+                            p_tag.add_run(plain_content)
                                     
                     doc.add_page_break()
                     
-                    # 다음 파일 전 휴식 간격 타임라인 연동
                     if idx < total_files - 1:
                         steps = 60 
                         for step in range(steps):
@@ -223,7 +224,6 @@ try:
                             status_text.text(f"⏳ 처리하는데 시간이 걸리니 조금만 기다려주세요.. ({sec_left}초)")
                             time.sleep(0.1)
 
-            # 결과 다운로드 화면 출력
             if success_count > 0:
                 if not quota_blocked:
                     percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
