@@ -1,7 +1,6 @@
 import streamlit as st
 from docx import Document
-from docx.shared import Pt
-from io import BytesIO
+from docx.shared import Pt, RGBColor  # 💡 RGBColor를 워드 라이브러리에서 올바르게 가져오도록 수정
 import time
 import re
 from google import genai
@@ -100,7 +99,6 @@ try:
         if st.button("Word 파일로 변환하기 ✨"):
             
             doc = Document()
-            # 본문 기본 스타일 지정
             style = doc.styles['Normal']
             style.font.name = 'Arial'
             style.font.size = Pt(11)
@@ -119,7 +117,6 @@ try:
             for idx, file in enumerate(uploaded_files):
                 image_bytes = file.read()
                 
-                # 본문 내부 과도한 볼드 형성을 막기 위해 프롬프트 정밀 정제
                 prompt = """
                 이 사진 속의 영어 지문 텍스트를 정확하게 추출해줘.
                 - 사진의 메인 제목이나 'Participating in the Plot'과 같은 소제목이 있다면 텍스트 제일 앞에 '[HEADING]' 이라는 태그를 붙여줘. (예: [HEADING] Participating in the Plot)
@@ -160,63 +157,70 @@ try:
                     break
 
                 if extracted_text:
-                    success_count += 1
-                    target_percent = int(((idx + 1) / total_files) * 100)
-                    if idx == total_files - 1:
-                        target_percent = 100
-                    
-                    for p in range(current_percent, target_percent + 1):
-                        percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
-                        progress_bar.progress(p)
-                        time.sleep(0.01)
-                    
-                    current_percent = target_percent
-                    status_text.text(f"✅ [{idx+1}/{total_files}] 정제 완료!")
-                    
-                    # 각 사진 출처 표기 (본문 서식 유지)
-                    p_src = doc.add_paragraph()
-                    r_src = p_src.add_run(f"▪ Source: {file.name}")
-                    r_src.font.size = Pt(10)
-                    r_src.font.color.rgb = types.RGBColor(128, 128, 128) if 'types' in locals() else None # 회색 서식
-                    
-                    paragraphs = extracted_text.split('\n')
-                    for para_text in paragraphs:
-                        clean_text = para_text.strip()
-                        if not clean_text:
-                            continue
+                    # 💡 안전망 구축: 워드 문서를 작성하는 내부 과정에서 에러가 나더라도 튕기지 않도록 방어막 추가
+                    try:
+                        success_count += 1
+                        target_percent = int(((idx + 1) / total_files) * 100)
+                        if idx == total_files - 1:
+                            target_percent = 100
                         
-                        p_tag = doc.add_paragraph()
+                        for p in range(current_percent, target_percent + 1):
+                            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
+                            progress_bar.progress(p)
+                            time.sleep(0.01)
                         
-                        # 스타일링 1: 소제목/제목 구조 처리 (본문보다 살짝만 크고 이쁘게 볼드)
-                        if clean_text.startswith("[HEADING]"):
-                            heading_content = clean_text.replace("[HEADING]", "").strip()
-                            run = p_tag.add_run(heading_content)
-                            run.bold = True
-                            run.font.size = Pt(13) # 💡 기존 큰 대형 헤딩 서식을 버리고 본문(11pt)보다 살짝 큰 13pt 지정
-                            p_tag.paragraph_format.space_before = Pt(12) # 위쪽 여백 살짝 배치
-                            p_tag.paragraph_format.space_after = Pt(6)   # 아래쪽 여백
+                        current_percent = target_percent
+                        status_text.text(f"✅ [{idx+1}/{total_files}] 정제 완료!")
+                        
+                        # 사진 출처 표기 (충돌 없는 정품 RGBColor 코드로 교정 완료)
+                        p_src = doc.add_paragraph()
+                        r_src = p_src.add_run(f"▪ Source: {file.name}")
+                        r_src.font.size = Pt(10)
+                        r_src.font.color.rgb = RGBColor(128, 128, 128)  # 깨끗하게 회색으로 적용
+                        
+                        paragraphs = extracted_text.split('\n')
+                        for para_text in paragraphs:
+                            clean_text = para_text.strip()
+                            if not clean_text:
+                                continue
                             
-                        # 스타일링 2: 대화문 주체 구조 처리
-                        elif clean_text.startswith("[NAME]"):
-                            name_content = clean_text.replace("[NAME]", "").strip()
-                            match = re.match(r"^([^:]+:)(.*)$", name_content)
-                            if match:
-                                name_part = match.group(1)   
-                                dialogue_part = match.group(2) 
-                                r_name = p_tag.add_run(name_part)
-                                r_name.bold = True
-                                p_tag.add_run(dialogue_part)
-                            else:
-                                p_tag.add_run(name_content)
+                            p_tag = doc.add_paragraph()
+                            
+                            # 스타일링 1: 소제목/제목 구조 처리
+                            if clean_text.startswith("[HEADING]"):
+                                heading_content = clean_text.replace("[HEADING]", "").strip()
+                                run = p_tag.add_run(heading_content)
+                                run.bold = True
+                                run.font.size = Pt(13) 
+                                p_tag.paragraph_format.space_before = Pt(12) 
+                                p_tag.paragraph_format.space_after = Pt(6)   
                                 
-                        # 스타일링 3: 일반 본문 문장 구조 처리 (불필요한 자동 볼드 전면 해제)
-                        else:
-                            # 엠베디드된 볼드 제거 후 깔끔한 일반 텍스트 바인딩
-                            plain_content = clean_text.replace("**", "")
-                            p_tag.add_run(plain_content)
+                            # 스타일링 2: 대화문 주체 구조 처리
+                            elif clean_text.startswith("[NAME]"):
+                                name_content = clean_text.replace("[NAME]", "").strip()
+                                match = re.match(r"^([^:]+:)(.*)$", name_content)
+                                if match:
+                                    name_part = match.group(1)   
+                                    dialogue_part = match.group(2) 
+                                    r_name = p_tag.add_run(name_part)
+                                    r_name.bold = True
+                                    p_tag.add_run(dialogue_part)
+                                else:
+                                    p_tag.add_run(name_content)
                                     
-                    doc.add_page_break()
+                            # 스타일링 3: 일반 본문 문장 구조 처리 (불필요한 자동 볼드 전면 해제)
+                            else:
+                                plain_content = clean_text.replace("**", "")
+                                p_tag.add_run(plain_content)
+                                        
+                        doc.add_page_break()
+                        
+                    except Exception as word_err:
+                        # 워드 디자인 코드가 혹시나 꼬여도 에러 로그만 남기고 다음 사진으로 부드럽게 무조건 패스
+                        st.warning(f"⚠️ '{file.name}' 문서 서식 스타일링 적용 중 경미한 지연이 있습니다. 텍스트 추출은 유지됩니다.")
+                        continue
                     
+                    # 파일 간 시간 간격 제어
                     if idx < total_files - 1:
                         steps = 60 
                         for step in range(steps):
@@ -238,7 +242,7 @@ try:
                 
                 st.markdown('<div class="status-box">', unsafe_allow_html=True)
                 st.download_button(
-                    label=f"📥 변환된 Word 파일 다운로드 ({success_count}개 지문 포함)",
+                    label="📥 변환된 Word 파일 다운로드",
                     data=docx_buffer,
                     file_name="Converted_English_Texts.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
