@@ -1,7 +1,7 @@
 import streamlit as st
 from docx import Document
 from docx.shared import Pt, RGBColor
-from io import BytesIO  # 💡 누락되었던 BytesIO 라이브러리를 정확하게 다시 추가했습니다.
+from io import BytesIO
 import time
 import re
 from google import genai
@@ -15,7 +15,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# 세련되고 직관적인 커스텀 CSS (원장님 취향 저격 크림/그린 테마)
+# 세련되고 직관적인 커스텀 CSS (크림/그린 테마 정자체 세팅)
 st.markdown("""
     <style>
     .stApp { background-color: #FDFBF6; }
@@ -80,6 +80,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# UI 상단 타이틀 및 설명 구조 정제
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
 st.markdown('<div class="author-footer">(Made by Manju)</div>', unsafe_allow_html=True)
@@ -118,11 +119,17 @@ try:
             for idx, file in enumerate(uploaded_files):
                 image_bytes = file.read()
                 
+                # 💡 줄바꿈 및 교재용 행 번호(5, 10, 15) 노이즈를 완벽하게 거르는 강력한 프롬프트 지시
                 prompt = """
-                이 사진 속의 영어 지문 텍스트를 정확하게 추출해줘.
-                - 사진의 메인 제목이나 'Participating in the Plot'과 같은 소제목이 있다면 텍스트 제일 앞에 '[HEADING]' 이라는 태그를 붙여줘. (예: [HEADING] Participating in the Plot)
+                이 사진 속의 영어 지문 텍스트를 상식적이고 가독성 높은 문맥에 맞춰 추출해줘.
+                - 사진의 메인 제목이나 큰 단원 소제목이 있다면 텍스트 제일 앞에 '[HEADING]' 이라는 태그를 붙여줘. (예: [HEADING] Into a New World of Storytelling)
                 - 대화 내용 구조인 경우에만, 대화 주체 이름 뒤에 콜론(:)을 붙이고 이름 앞에 '[NAME]' 태그를 붙여줘. (예: [NAME] Mike: Hey, guys!)
-                - 일반 본문 내용(지문 문장들)은 무조건 아무런 마크다운 태그(**)나 설명 없이 순수한 텍스트 서체로만 출력해줘. 본문 단어에 임의로 진하게 설정을 넣지 마.
+                
+                [⚠️ 중요 규칙: 가독성 및 줄바꿈 지시]
+                - 영어 원문 텍스트 중간이나 우측 가장자리에 적혀 있는 '5', '10', '15'와 같은 행 번호(Line Numbers) 표시는 지문 본문 단어와 꼬이지 않도록 완벽하게 무시하고 걷어내줘.
+                - 원본 사진의 줄바꿈을 억지로 따라 하지 마. 하나의 긴 단락(Paragraph)은 인위적으로 끊지 말고 쭉 이어서 하나의 유기적인 문단으로 합쳐서 완성해줘. 
+                - 오직 문맥상 새로운 이야기나 단락이 시작될 때만 자연스럽게 줄바꿈을 적용해줘.
+                - 본문 단어에 임의로 마크다운 별표(**)나 진하게 설정을 넣지 마. 오직 순수한 텍스트만 출력해줘.
                 - 결과물은 오직 추출된 텍스트만 보여주고, 다른 부연 설명은 하지 마.
                 """
                 
@@ -172,7 +179,7 @@ try:
                         current_percent = target_percent
                         status_text.text(f"✅ [{idx+1}/{total_files}] 정제 완료!")
                         
-                        # 사진 출처 표기
+                        # 사진 출처 표기 서식
                         p_src = doc.add_paragraph()
                         r_src = p_src.add_run(f"▪ Source: {file.name}")
                         r_src.font.size = Pt(10)
