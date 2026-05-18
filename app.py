@@ -1,6 +1,7 @@
 import streamlit as st
 from docx import Document
-from docx.shared import Pt, RGBColor  # 💡 RGBColor를 워드 라이브러리에서 올바르게 가져오도록 수정
+from docx.shared import Pt, RGBColor
+from io import BytesIO  # 💡 누락되었던 BytesIO 라이브러리를 정확하게 다시 추가했습니다.
 import time
 import re
 from google import genai
@@ -14,7 +15,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# 세련되고 직관적인 커스텀 CSS
+# 세련되고 직관적인 커스텀 CSS (원장님 취향 저격 크림/그린 테마)
 st.markdown("""
     <style>
     .stApp { background-color: #FDFBF6; }
@@ -157,7 +158,6 @@ try:
                     break
 
                 if extracted_text:
-                    # 💡 안전망 구축: 워드 문서를 작성하는 내부 과정에서 에러가 나더라도 튕기지 않도록 방어막 추가
                     try:
                         success_count += 1
                         target_percent = int(((idx + 1) / total_files) * 100)
@@ -172,11 +172,11 @@ try:
                         current_percent = target_percent
                         status_text.text(f"✅ [{idx+1}/{total_files}] 정제 완료!")
                         
-                        # 사진 출처 표기 (충돌 없는 정품 RGBColor 코드로 교정 완료)
+                        # 사진 출처 표기
                         p_src = doc.add_paragraph()
                         r_src = p_src.add_run(f"▪ Source: {file.name}")
                         r_src.font.size = Pt(10)
-                        r_src.font.color.rgb = RGBColor(128, 128, 128)  # 깨끗하게 회색으로 적용
+                        r_src.font.color.rgb = RGBColor(128, 128, 128)  
                         
                         paragraphs = extracted_text.split('\n')
                         for para_text in paragraphs:
@@ -208,7 +208,7 @@ try:
                                 else:
                                     p_tag.add_run(name_content)
                                     
-                            # 스타일링 3: 일반 본문 문장 구조 처리 (불필요한 자동 볼드 전면 해제)
+                            # 스타일링 3: 일반 본문 문장 구조 처리 (불필요한 자동 볼드 해제)
                             else:
                                 plain_content = clean_text.replace("**", "")
                                 p_tag.add_run(plain_content)
@@ -216,11 +216,9 @@ try:
                         doc.add_page_break()
                         
                     except Exception as word_err:
-                        # 워드 디자인 코드가 혹시나 꼬여도 에러 로그만 남기고 다음 사진으로 부드럽게 무조건 패스
                         st.warning(f"⚠️ '{file.name}' 문서 서식 스타일링 적용 중 경미한 지연이 있습니다. 텍스트 추출은 유지됩니다.")
                         continue
                     
-                    # 파일 간 시간 간격 제어
                     if idx < total_files - 1:
                         steps = 60 
                         for step in range(steps):
