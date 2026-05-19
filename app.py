@@ -84,7 +84,6 @@ st.markdown("""
 # UI 상단 타이틀 및 설명 구조 정제
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
-# [수정] 저작권 문구에서 연도(2026) 제외
 st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
 try:
@@ -117,6 +116,7 @@ try:
             current_percent = 0
             success_count = 0     
             quota_blocked = False 
+            api_failed_completely = False # [추가] API가 완전히 실패했는지 추적하는 플래그
             
             for idx, file in enumerate(uploaded_files):
                 image_bytes = file.read()
@@ -142,44 +142,51 @@ try:
 
                 virtual_target = max(current_percent, real_target_percent - 3)
                 
+                # [개선] 초기화 위치를 루프 시작점으로 보장하여 잔여 데이터 충돌 방지
                 extracted_text = ""
                 max_retries = 3  
                 
                 for attempt in range(max_retries):
                     try:
-                        # 구글 API 단독 1회 호출 설계
                         response = client.models.generate_content(
                             model=model_name,
                             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.type), prompt]
                         )
                         
-                        # 체감 진행 속도 완충 부드러운 애니메이션 루프
+                        # 응답 성공 시 텍스트 추출 및 가상 진행률 바 상승
+                        extracted_text = response.text
+                        
                         for p in range(current_percent, virtual_target + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
                             time.sleep(0.02)
-                        
-                        extracted_text = response.text
+                            
                         current_percent = virtual_target
                         break  
                         
                     except (APIError, ClientError, ServerError) as e:
                         error_str = str(e).upper()
-                        if "LIMIT: 20" in error_str or "QUOTA" in error_str:
+                        # [개선] 구글 무료 티어 한도 초과 메시지 조건 판정 다양화 (429, LIMIT, EXHAUSTED)
+                        if "LIMIT: 20" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str:
                             quota_blocked = True
                             break
                             
                         if attempt < max_retries - 1:
-                            for remaining in range(5, 0, -1):
+                            for remaining in range(3, 0, -1):
                                 status_text.text(f"⏳ 서버 연결을 재시도하고 있습니다.. 잠시만 기다려주세요. ({remaining}초)")
                                 time.sleep(1)
                         else:
-                            st.error(f"❌ '{file.name}' 파일 변환 중 네트워크 오류가 발생했습니다.")
+                            # 3번 다 실패했을 경우 완전 실패로 간주
+                            api_failed_completely = True
                             
                 if quota_blocked:
                     st.warning("⚠️ 하루 이용 한도를 모두 소진했습니다. 현재까지 성공한 지문들로만 워드 문서를 저장합니다.")
                     break
+                    
+                if api_failed_completely:
+                    break
 
+                # 텍스트가 정상적으로 추출되었을 때만 Word 본문 서식 작업 진행
                 if extracted_text:
                     try:
                         success_count += 1
@@ -246,14 +253,14 @@ try:
                             status_text.text(f"⏳ 다음 지문을 가져오는 중입니다.. ({sec_left}초)")
                             time.sleep(0.1)
 
+            # [개선된 조건문 아키텍처] 상황별 메시지 중복 노출 전면 차단
             if success_count > 0:
                 if not quota_blocked:
                     percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
                     progress_bar.progress(100)
                     status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 멋지게 변환되었습니다!")
-                else:
-                    status_text.text(f"⚠️ 이용 한도로 인해 {success_count}개의 지문만 먼저 변환이 완료되었습니다.")
                 
+                # 한도 초과로 중단되었더라도 성공한 게 있다면 다운로드 버튼만 깨끗하게 오픈
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
                 docx_buffer.seek(0)
@@ -266,8 +273,14 @@ try:
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
+                
             else:
-                st.error("❌ 구글 서버 연결이 일시적으로 원활하지 않습니다. 잠시 후 다시 시도해 주세요.")
+                # 성공 개수가 0개인데 한도 초과인 경우
+                if quota_blocked:
+                    st.error("⚠️ 오늘 제공되는 구글의 무료 변환 한도가 모두 소진되어 지금은 변환을 시작할 수 없습니다. 내일 다시 이용해 주세요.")
+                # 일반적인 서버 다운/네트워크 오류인 경우
+                else:
+                    st.error("❌ 구글 서버 연결이 일시적으로 원활하지 않습니다. 잠시 후 다시 시도해 주세요.")
 
 except KeyError:
     st.error("🔒 설정 오류: Streamlit Secrets에 API Key를 등록해 주세요.")
