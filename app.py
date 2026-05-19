@@ -25,11 +25,12 @@ st.markdown("""
 
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
+st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
 # 🛠️ 비동기 API 워커 함수
 def gemini_api_worker(client, pil_image, prompt, result):
     try:
-        # 선생님 환경에서 정상 작동이 검증된 2.5-flash 모델 적용
+        # 선생님 환경에서 정상 작동이 확인된 2.5-flash 모델 적용
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[pil_image, prompt],
@@ -52,6 +53,8 @@ try:
         style = doc.styles['Normal']
         style.font.name = 'Arial'
         
+        # UI 요소 초기화 (에러가 나도 화면에 틀이 남아있도록 배치)
+        percent_display = st.empty()
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -69,27 +72,31 @@ try:
             
             status_text.text(f"⏳ [{idx+1}/{len(uploaded_files)}] '{file.name}' 지문을 분석 중입니다...")
             
+            start_p = int((idx / len(uploaded_files)) * 100)
+            end_p = int(((idx + 1) / len(uploaded_files)) * 100)
+            p = start_p
+            
+            # 🛠️ 서버가 즉시 튕겨내더라도 퍼센트 글자가 무조건 화면에 1번 이상 찍히도록 강제 출력
+            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
+            progress_bar.progress(p)
+            
             # 스레드 시작 (백그라운드에서 AI 분석)
             thread = threading.Thread(target=gemini_api_worker, args=(client, raw_img, prompt, result))
             thread.start()
             
-            # 🛠️ 부드러운 진행률 애니메이션 루프
-            start_p = int((idx / len(uploaded_files)) * 100)
-            end_p = int(((idx + 1) / len(uploaded_files)) * 100)
-            
-            p = start_p
+            # 부드러운 진행률 애니메이션 루프
             while thread.is_alive():
-                # 목표치의 98%까지만 가상으로 채우며 사용자 대기 시간 지루함 방지
                 if p < end_p - 2:
                     p += 1
+                    percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p)
-                time.sleep(0.05) # 애니메이션 속도 제어
+                time.sleep(0.05)
             
             thread.join()
             
             if result["status"] == "success":
                 success_count += 1
-                progress_bar.progress(end_p) # 완료 시 해당 파일 목표 퍼센트 꽉 채우기
+                progress_bar.progress(end_p) 
                 
                 # 워드 조립
                 p_src = doc.add_paragraph()
@@ -127,6 +134,7 @@ try:
             if quota_blocked:
                 st.warning("⚠️ 하루 구글 무료 이용 한도(20회)가 소진되었습니다. 지금까지 변환 성공한 파일들만 저장합니다.")
             else:
+                percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
                 progress_bar.progress(100)
                 status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 완성되었습니다!")
             
