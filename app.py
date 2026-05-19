@@ -3,10 +3,9 @@ from docx import Document
 from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
-import re  # 🛠️ NameError 해결을 위해 반드시 필요한 정규표현식 라이브러리
-from PIL import Image  # 🛠️ 고용량 이미지 압축 및 전처리를 위한 라이브러리
-from google import genai
-from google.genai import types
+import re  # 🛠️ NameError(re) 예방을 위한 정규표현식 라이브러리
+from PIL import Image  # 🛠️ 이미지 압축 및 전처리를 위한 라이브러리
+import google.genai as genai  # 🛠️ NameError(genai)를 완벽하게 차단하는 명확한 임포트 방식
 
 # 1. 페이지 기본 설정 및 디자인
 st.set_page_config(
@@ -114,10 +113,12 @@ try:
             model_name = 'gemini-2.5-flash'
             success_count = 0     
             
+            current_ui_percent = 0  # 🛠️ 부드러운 전진을 위한 전역 퍼센트 추적기
+            
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
                 
-                # 🛠️ 고용량 사진 데이터 해상도 다이어트 및 포맷 최적화 (토큰 한도 초과 방지)
+                # 고용량 사진 데이터 최적화 전처리
                 try:
                     raw_img = Image.open(BytesIO(file_bytes))
                     if raw_img.mode != 'RGB':
@@ -149,14 +150,15 @@ try:
                 
                 status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 깨끗하게 읽어오는 중입니다...")
                 
-                # 진행률 계산 및 부드러운 전진 효과
-                current_percent = int((idx / total_files) * 100)
+                # 🛠️ [진행률 로직 개선] API 요청 전, 목표치 전까지 1%씩 아주 부드럽게 전진
                 target_percent = int(((idx + 1) / total_files) * 100)
+                pre_target = max(current_ui_percent, target_percent - 5)
                 
-                for p in range(current_percent, min(target_percent, current_percent + 5)):
+                for p in range(current_ui_percent, pre_target + 1):
                     percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p)
                     time.sleep(0.02)
+                current_ui_percent = pre_target
 
                 # API 호출 수행
                 try:
@@ -173,12 +175,13 @@ try:
                     try:
                         success_count += 1
                         
-                        # 파일 분석 완료 후 해당 구간 채우기
-                        for p in range(min(target_percent, current_percent + 5), target_percent + 1):
+                        # 🛠️ [진행률 로직 개선] API 성공 시, 나머지 퍼센트를 촘촘하게 채워 점프 현상 완전 차단
+                        for p in range(current_ui_percent, target_percent + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
                             time.sleep(0.01)
                         
+                        current_ui_percent = target_percent
                         status_text.text(f"✅ [{idx+1}/{total_files}] 지문 변환 및 서식 정리 완료!")
                         
                         # 사진 출처 표기 서식
@@ -224,15 +227,16 @@ try:
                                         
                         doc.add_page_break()
                         
-                    except Exception as word_err:
+                    except Exception:
                         st.warning(f"⚠️ '{file.name}' 문서 디자인 조립 중 경미한 지연이 생겨 안전하게 다음으로 패스합니다.")
                         continue
                     
-                    # 연속 요청 간격을 주어 트래픽 분산
+                    # 연속 요청 간격을 주어 트래픽 안정성 확보
                     if idx < total_files - 1:
-                        time.sleep(1.0)
+                        time.sleep(0.8)
 
             if success_count > 0:
+                # 🛠️ 최종 100% 도달 보장
                 percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
                 progress_bar.progress(100)
                 status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 완성되었습니다!")
