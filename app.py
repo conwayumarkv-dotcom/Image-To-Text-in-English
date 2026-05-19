@@ -4,7 +4,8 @@ from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
 import re
-from PIL import Image # 🛠️ 구글 API 내부 버그 해결을 위해 PIL 라이브러리 연동
+import threading  # 🛠️ Streamlit 리런 버그 및 한도 초과 차단을 위한 스레드 도입
+from PIL import Image
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError, ClientError, ServerError
@@ -82,10 +83,33 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# UI 상단 타이틀 및 설명 구조 정제
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
 st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
+
+# 🛠️ 백그라운드에서 구글 API를 단 1번만 안전하게 호출하는 워커 함수 정의
+def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[pil_image, prompt],
+                config=types.GenerateContentConfig(response_mime_type="text/plain")
+            )
+            result_container["text"] = response.text
+            result_container["status"] = "success"
+            return
+        except Exception as e:
+            error_str = str(e).upper()
+            if ("LIMIT" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str):
+                result_container["status"] = "quota_error"
+                return
+            if attempt < max_retries - 1:
+                time.sleep(1.5)
+                continue
+            result_container["status"] = "fail"
+            return
 
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -120,18 +144,17 @@ try:
             api_failed_completely = False 
             
             for idx, file in enumerate(uploaded_files):
-                # 🛠️ [버그 완전 해결] 파일을 읽어 바이너리로 넘기지 않고 PIL 이미지 개체로 즉시 로드
                 file_bytes = file.read()
                 try:
                     pil_image = Image.open(BytesIO(file_bytes))
-                except Exception as img_err:
+                except Exception:
                     st.error(f"❌ '{file.name}' 이미지를 읽어오는 중에 오류가 발생했습니다.")
                     continue
                 
                 prompt = """
                 사진 속의 영어 지문 텍스트를 상식적이고 가독성 높은 문맥에 맞춰 추출해줘.
                 - 메인 제목이나 단원 소제목이 있다면 제일 앞에 '[HEADING]' 태그를 붙여줘.
-                - 대화 내용 구조인 경우, 대화 주체 이름 앞에 '[NAME]' 태그를 붙이고 이름 뒤에 콜론(:)을 붙여줘. (예: [NAME] Mike: )
+                - 대화 내용 구조인 경우, 대화 주체 이름 앞에 '[NAME]' 태그를 붙이고 이름 뒤에 콜론(:)을 붙여줘.
                 - 영어 지문 중간이나 우측 가장자리에 적혀 있는 '5', '10', '15'와 같은 교재 행 번호 표시(Line Numbers)는 완전히 무시하고 제거해줘.
                 - 사진의 강제 줄바꿈을 따라 하지 마. 유기적인 단락(Paragraph)은 하나의 긴 문단으로 쭉 이어서 합쳐주고, 문맥상 완전히 새로운 문단이 시작될 때만 줄바꿈을 적용해줘.
                 - 본문에 마크다운 별표(**)나 진하게 설정을 넣지 마.
@@ -145,44 +168,33 @@ try:
 
                 virtual_target = max(current_percent, real_target_percent - 3)
                 
-                extracted_text = ""
-                max_retries = 3  
+                # 🛠️ 스레드 통신용 컨테이너 생성
+                worker_result = {"status": "pending", "text": ""}
                 
-                for attempt in range(max_retries):
-                    try:
-                        # 🛠️ [구조 전면 혁신] contents 리스트에 PIL 이미지 인스턴스를 날것 그대로 연동
-                        # 이 방식을 쓰면 데이터 직렬화 버그가 발생하지 않아 구글 서버가 정상 처리합니다.
-                        response = client.models.generate_content(
-                            model=model_name,
-                            contents=[pil_image, prompt],
-                            config=types.GenerateContentConfig(
-                                response_mime_type="text/plain"
-                            )
-                        )
-                        
-                        extracted_text = response.text
-                        
-                        for p in range(current_percent, virtual_target + 1):
-                            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
-                            progress_bar.progress(p)
-                            time.sleep(0.02)
-                            
-                        current_percent = virtual_target
-                        break  
-                        
-                    except (APIError, ClientError, ServerError) as e:
-                        error_str = str(e).upper()
-                        if "LIMIT" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str:
-                            quota_blocked = True
-                            break
-                            
-                        if attempt < max_retries - 1:
-                            for remaining in range(3, 0, -1):
-                                status_text.text(f"⏳ 서버 연결을 재시도하고 있습니다.. 잠시만 기다려주세요. ({remaining}초)")
-                                time.sleep(1)
-                        else:
-                            api_failed_completely = True
-                            
+                # 🛠️ 비동기 스레드 생성 및 시작 (단어장 프로그램과 완전히 동일한 메커니즘 수립)
+                api_thread = threading.Thread(
+                    target=gemini_api_worker,
+                    args=(client, model_name, pil_image, prompt, worker_result)
+                )
+                api_thread.start()
+                
+                # 🛠️ AI가 스레드에서 돌아가는 동안 진행바를 부드럽게 선형 제어
+                ui_progress = float(current_percent)
+                while api_thread.is_alive():
+                    if ui_progress < float(virtual_target):
+                        ui_progress += 0.4
+                        if ui_progress > float(virtual_target):
+                            ui_progress = float(virtual_target)
+                        percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {int(ui_progress)}%</p>', unsafe_allow_html=True)
+                        progress_bar.progress(int(ui_progress))
+                    time.sleep(0.04)
+                
+                # 스레드 종료 후 결과 판정
+                if worker_result["status"] == "quota_error":
+                    quota_blocked = True
+                elif worker_result["status"] == "fail":
+                    api_failed_completely = True
+                
                 if quota_blocked:
                     if success_count > 0:
                         st.warning("⚠️ 하루 이용 한도를 모두 소진했습니다. 현재까지 성공한 지문들로만 워드 문서를 저장합니다.")
@@ -191,11 +203,12 @@ try:
                 if api_failed_completely:
                     break
 
-                if extracted_text:
+                if worker_result["status"] == "success" and worker_result["text"]:
+                    extracted_text = worker_result["text"]
                     try:
                         success_count += 1
                         
-                        for p in range(current_percent, real_target_percent + 1):
+                        for p in range(int(ui_progress), real_target_percent + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
                             time.sleep(0.01)
@@ -242,14 +255,14 @@ try:
                                         
                         doc.add_page_break()
                         
-                    except Exception as word_err:
+                    except Exception:
                         st.warning(f"⚠️ '{file.name}' 서식을 다듬는 과정에서 경미한 지연이 있습니다.")
                         continue
                     
                     if idx < total_files - 1:
-                        steps = 20 
+                        steps = 10 
                         for step in range(steps):
-                            sec_left = 2 - (step // 10)
+                            sec_left = 1 - (step // 10)
                             status_text.text(f"⏳ 다음 지문을 가져오는 중입니다.. ({sec_left}초)")
                             time.sleep(0.1)
 
