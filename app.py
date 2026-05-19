@@ -5,9 +5,8 @@ from docx.oxml.ns import qn
 from io import BytesIO
 import time
 import re
-from PIL import Image
+from PIL import Image, ImageOps
 from google import genai
-from google.genai import types
 
 # 1. 페이지 기본 설정 및 디자인
 st.set_page_config(
@@ -100,7 +99,7 @@ try:
             style._element.rPr.get_or_add_rFonts().set(qn('w:hAnsi'), 'Arial')
             style.font.size = Pt(11)
             
-            # 레이아웃 고정용 칸 초기화
+            # 진행바 즉시 배치
             percent_display = st.empty()  
             progress_bar = st.progress(0)  
             status_text = st.empty()       
@@ -110,8 +109,6 @@ try:
             status_text.text("🔄 인공지능 교사가 지문 판독을 시작합니다. 잠시만 기다려주세요...")
             
             total_files = len(uploaded_files)
-            
-            # [404 에러 완벽 해결] 현재 구글 SDK v1beta 버전 환경에서 오류 없는 정식 표준 모델로 매핑
             model_name = 'gemini-2.0-flash'
             
             success_count = 0     
@@ -125,6 +122,12 @@ try:
                 file_bytes = file.read()
                 extracted_text = "" 
                 
+                # 무료 계정 우회를 위한 필수 대기 장치 (두 번째 사진부터 10초씩 안정적으로 대기)
+                if idx > 0:
+                    for wait_sec in range(10, 0, -1):
+                        status_text.text(f"⏳ 구글 서버 안정화 대기 중... ({wait_sec}초 남음)")
+                        time.sleep(1)
+                
                 start_p = int(idx * progress_per_file)
                 mid_p = int((idx + 0.6) * progress_per_file)
                 end_p = int((idx + 1) * progress_per_file)
@@ -136,14 +139,13 @@ try:
                     time.sleep(0.01)
                 
                 try:
-                    # [토큰 다이어트 1] 화질은 유지하되 픽셀 압축을 최적화하여 인공지능이 소모하는 이미지 토큰 절반 이하로 절감
+                    # [토큰 다이어트 1] 해상도를 낮추고 명암(흑백)을 최적화하여 픽셀 정보 토큰 최소화
                     raw_img = Image.open(BytesIO(file_bytes))
-                    if raw_img.mode != 'RGB':
-                        raw_img = raw_img.convert('RGB')
-                    raw_img.thumbnail((900, 900), Image.Resampling.LANCZOS)
+                    raw_img = ImageOps.grayscale(raw_img) # 흑백 변환
+                    raw_img.thumbnail((800, 800), Image.Resampling.LANCZOS)
                     
                     compressed_buffer = BytesIO()
-                    raw_img.save(compressed_buffer, format="JPEG", quality=75)
+                    raw_img.save(compressed_buffer, format="JPEG", quality=70)
                     pil_image = Image.open(BytesIO(compressed_buffer.getvalue()))
                 except Exception:
                     try:
@@ -151,49 +153,35 @@ try:
                     except Exception:
                         continue
                 
-                # [토큰 다이어트 2] 지시 프롬프트를 핵심 요약하여 전송 토큰 최소화
+                # [토큰 다이어트 2] 지시 프롬프트를 최소 단어 위주로 극단적 압축
                 prompt = """
                 Extract English text from image.
                 - Add '[HEADING]' before titles.
-                - Add '[NAME]' before speaker names (e.g. [NAME] Tom:).
+                - Add '[NAME]' before speaker names.
                 - Delete all line numbers.
                 - Keep paragraphs continuous.
-                - Raw plain text only, no markdown.
+                - No markdown.
                 """
 
                 status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능 교사가 지문을 깨끗하게 정렬하는 중입니다...")
                 
-                # 불필요한 재시도 횟수를 줄여 서버 한도 초과 원천 봉쇄
-                max_retries = 2
-                for attempt in range(max_retries):
-                    try:
-                        response = client.models.generate_content(
-                            model=model_name,
-                            contents=[pil_image, prompt],
-                            config=types.GenerateContentConfig(temperature=0.0)
-                        )
-                        extracted_text = response.text
-                        last_extracted_text = extracted_text
+                try:
+                    # 토큰 효율화를 위해 config 파라미터를 덜어내고 핵심만 호출
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=[pil_image, prompt]
+                    )
+                    extracted_text = response.text
+                    last_extracted_text = extracted_text
+                    
+                except Exception as api_err:
+                    error_msg = str(api_err).upper()
+                    if any(x in error_msg for x in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT_EXCEEDED"]):
+                        quota_blocked = True
                         break 
-                        
-                    except Exception as api_err:
-                        error_msg = str(api_err).upper()
-                        if any(x in error_msg for x in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT_EXCEEDED"]):
-                            quota_blocked = True
-                            break 
-                        
-                        if "404" in error_msg or "NOT_FOUND" in error_msg:
-                            api_error_occurred = True
-                            break
-                            
-                        if attempt < max_retries - 1:
-                            time.sleep(1.0)
-                            continue
-                        else:
-                            break
-
-                if quota_blocked or api_error_occurred:
-                    break
+                    else:
+                        api_error_occurred = True
+                        break
 
                 if extracted_text:
                     try:
@@ -259,7 +247,7 @@ try:
                 status_text.text("🎉 모든 영어 지문이 깨끗한 워드 파일 문서로 완성되었습니다!")
                 
                 if quota_blocked:
-                    st.warning("⚠️ 오늘 준비된 무료 사용량이 도중에 소진되어, 판독에 성공한 지문들 위주로 우선 정렬되었습니다.")
+                    st.warning("⚠️ 무료 사용 한도로 인해 일부 지문만 정렬되었습니다. 잠시 후 다시 시도해 주세요.")
 
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
@@ -275,15 +263,15 @@ try:
             elif quota_blocked and success_count == 0:
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("⚠️ 오늘 제공되는 구글 인공지능의 하루 무료 한도를 모두 소진했습니다. 내일 다시 시도하시거나 유료 API 계정 전환이 필요합니다.")
+                st.error("⚠️ 구글 무료 한도가 초과되었습니다. 1~2분 뒤에 페이지를 새로고침하여 다시 실행해 주세요.")
             elif api_error_occurred:
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("❌ 서버 환경 모델명 설정에 오류가 있습니다. 개발 환경 라이브러리 검토가 필요합니다.")
+                st.error("❌ 통신 제한이 발생했습니다. 안전 장치가 보강되었으니 다시 시도해 주세요.")
             elif not last_extracted_text: 
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("❌ 사진에서 영어 글자를 전혀 찾지 못했습니다. 사진이 흐리거나 어둡지 않은지 확인 후 다시 업로드해 주세요.")
+                st.error("❌ 사진 속에서 텍스트를 감지하지 못했습니다. 이미지 상태를 확인해 주세요.")
 
 except KeyError:
     st.error("🔒 설정 오류: 프로그램 관리자 설정(Streamlit Secrets)에 구글 인증키가 올바르게 등록되지 않았습니다.")
