@@ -9,7 +9,6 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
-# 1. 페이지 기본 설정 및 디자인
 st.set_page_config(page_title="Image To Text in English", page_icon="📝", layout="centered")
 
 st.markdown("""
@@ -25,16 +24,38 @@ st.markdown("""
 
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 
-# 🛠️ 백그라운드 API 워커
-def gemini_api_worker(client, model, pil_image, prompt, result):
-    try:
-        # 모델 호출 (안정적인 gemini-2.0-flash 사용)
-        response = client.models.generate_content(model=model, contents=[pil_image, prompt])
-        result["text"] = response.text
-        result["status"] = "success"
-    except Exception as e:
-        result["status"] = "error"
-        result["error"] = str(e)
+# 🛠️ 여러 모델을 순차적으로 시도하는 똑똑한 워커 함수
+def gemini_api_worker_with_fallback(client, pil_image, prompt, result):
+    # 사용할 모델 후보군 (빠르고 무료 할당량이 넉넉한 순서)
+    models_to_try = ['gemini-1.5-flash-8b', 'gemini-1.5-flash', 'gemini-1.5-pro']
+    
+    last_error = None
+    for model in models_to_try:
+        try:
+            # temperature를 0으로 설정하여 무작위성 배제 및 토큰 절약
+            response = client.models.generate_content(
+                model=model, 
+                contents=[pil_image, prompt],
+                config=types.GenerateContentConfig(temperature=0.0)
+            )
+            result["text"] = response.text
+            result["status"] = "success"
+            result["used_model"] = model  # 성공한 모델 기록
+            return
+        except Exception as e:
+            error_str = str(e).upper()
+            last_error = e
+            
+            # 할당량(Quota) 문제라면 다음 모델로 넘어가서 재시도
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "QUOTA" in error_str:
+                time.sleep(1) # 아주 짧은 대기 후 다음 모델 시도
+                continue 
+            else:
+                # 다른 치명적 에러라면 즉시 중단
+                break
+                
+    result["status"] = "error"
+    result["error"] = str(last_error)
 
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -50,21 +71,20 @@ try:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 🛠️ 모델명 변경 (1.5가 안 잡힐 경우 2.0으로 시도)
-        model_name = 'gemini-2.0-flash'
+        success_count = 0
         
         for idx, file in enumerate(uploaded_files):
-            # 이미지 전처리
             raw_img = Image.open(file)
             if raw_img.mode != 'RGB': raw_img = raw_img.convert('RGB')
             raw_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
             
-            # API 호출용 스레드
-            result = {"status": "pending", "text": None, "error": None}
-            thread = threading.Thread(target=gemini_api_worker, args=(client, model_name, raw_img, "Extract text...", result))
+            result = {"status": "pending", "text": None, "error": None, "used_model": None}
+            prompt = "Extract text. Titles with [HEADING]. Dialogue with [NAME] Speaker: . Remove line numbers. Continuous paragraphs. Pure text only."
+            
+            # 스레드 시작
+            thread = threading.Thread(target=gemini_api_worker_with_fallback, args=(client, raw_img, prompt, result))
             thread.start()
             
-            # 애니메이션 루프
             start_p = int((idx / len(uploaded_files)) * 100)
             end_p = int(((idx + 1) / len(uploaded_files)) * 100)
             
@@ -77,20 +97,39 @@ try:
             thread.join()
             
             if result["status"] == "success":
+                success_count += 1
                 progress_bar.progress(end_p)
+                
                 # 워드 조립
+                p_src = doc.add_paragraph()
+                p_src.add_run(f"Source: {file.name}").font.color.rgb = RGBColor(128, 128, 128)
+                
                 for line in result["text"].split('\n'):
                     if not line.strip(): continue
                     para = doc.add_paragraph()
-                    para.add_run(line.replace("**", ""))
+                    
+                    if line.startswith("[HEADING]"):
+                        run = para.add_run(line.replace("[HEADING]", "").strip())
+                        run.bold = True
+                        run.font.size = Pt(13)
+                    elif line.startswith("[NAME]"):
+                        content = line.replace("[NAME]", "").strip()
+                        match = re.match(r"^([^:]+:)(.*)$", content)
+                        if match:
+                            para.add_run(match.group(1)).bold = True
+                            para.add_run(match.group(2))
+                        else:
+                            para.add_run(content)
+                    else:
+                        para.add_run(line.replace("**", ""))
                 doc.add_page_break()
             else:
-                st.error(f"❌ '{file.name}' 분석 실패: {result['error']}")
+                st.error(f"❌ '{file.name}' 분석 실패 (모든 모델 한도 초과): {result['error']}")
 
-        # 다운로드
-        buffer = BytesIO()
-        doc.save(buffer)
-        st.download_button("📥 워드 다운로드", data=buffer.getvalue(), file_name="output.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        if success_count > 0:
+            buffer = BytesIO()
+            doc.save(buffer)
+            st.download_button("📥 워드 다운로드", data=buffer.getvalue(), file_name="output.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 except Exception as e:
     st.error(f"시스템 에러: {str(e)}")
