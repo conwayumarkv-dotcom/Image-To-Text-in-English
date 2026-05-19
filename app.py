@@ -8,7 +8,6 @@ import re
 from PIL import Image, ImageOps
 from google import genai
 
-# 1. 페이지 기본 설정 및 디자인 테마
 st.set_page_config(
     page_title="Image To Text in English",
     page_icon="📝",
@@ -32,12 +31,6 @@ st.markdown("""
         text-align: center;
         margin-bottom: 10px;
     }
-    .author-footer {
-        font-size: 13px;
-        color: #A3A3A3; 
-        text-align: right;
-        margin-bottom: 45px;
-    }
     div.stButton > button:first-child {
         background-color: #94A69A;
         color: white;
@@ -58,9 +51,9 @@ st.markdown("""
 
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
-st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
 try:
+    # 1. API 키 로드 및 클라이언트 생성
     api_key = st.secrets["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key)
     
@@ -74,7 +67,6 @@ try:
         st.write(f"📂 **{len(uploaded_files)}개**의 파일이 선택되었습니다.")
         
         if st.button("Word 파일로 변환하기 ✨"):
-            
             doc = Document()
             style = doc.styles['Normal']
             style.font.name = 'Arial'
@@ -86,18 +78,12 @@ try:
             progress_bar = st.progress(0)  
             status_text = st.empty()       
             
-            percent_display.markdown('<p class="percent-text">⏳ 문서 생성률: 0%</p>', unsafe_allow_html=True)
-            progress_bar.progress(0.0)
-            status_text.text("🔄 구글 인공지능 서버 통신 상태를 체크하고 있습니다...")
-            
             total_files = len(uploaded_files)
-            
-            # 구글 정식 최신 SDK 공식 권장 플래시 모델 지정
             model_name = 'gemini-2.5-flash'
-            
             success_count = 0     
-            quota_blocked = False
-            last_extracted_text = "" 
+            
+            # 실제 구글 서버가 응답한 에러 메시지를 가감 없이 담아내기 위한 변수
+            raw_error_message = None 
             
             progress_per_file = 100.0 / total_files
             
@@ -105,38 +91,28 @@ try:
                 file_bytes = file.read()
                 extracted_text = "" 
                 
-                # 분당 트래픽 초과(RPM 제한)를 무조건 피해 가기 위한 안전 마진 확보
+                # 디레이팅 트래픽 가드: 무조건 3초 쉬고 호출
                 if idx > 0:
                     for remaining in range(3, 0, -1):
                         status_text.text(f"⏳ 구글 서버 안정화 대기 중... ({remaining}초)")
                         time.sleep(1)
                 
                 start_p = int(idx * progress_per_file)
-                mid_p = int((idx + 0.6) * progress_per_file)
-                end_p = int((idx + 1) * progress_per_file)
-                
-                status_text.text(f"📝 [{idx+1}/{total_files}] '{file.name}' 초경량 압축 최적화 중...")
-                for p in range(start_p, min(mid_p, 99) + 1):
-                    percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
-                    progress_bar.progress(p / 100.0)
-                    time.sleep(0.01)
+                status_text.text(f"📝 [{idx+1}/{total_files}] '{file.name}' 초정밀 이미지 전처리 중...")
+                progress_bar.progress(start_p / 100.0)
                 
                 try:
-                    # [토큰 최적화] 이미지를 완전히 흑백화하고 사이즈를 줄여 트래픽 비용을 제로 수준으로 감축
+                    # 이미지 600px 흑백 다이어트 가드 적용 (데이터 유실 최소화)
                     raw_img = Image.open(BytesIO(file_bytes))
                     raw_img = ImageOps.grayscale(raw_img)
-                    raw_img.thumbnail((650, 650), Image.Resampling.LANCZOS)
+                    raw_img.thumbnail((600, 600), Image.Resampling.LANCZOS)
                     
                     compressed_buffer = BytesIO()
                     raw_img.save(compressed_buffer, format="JPEG", quality=70)
                     pil_image = Image.open(BytesIO(compressed_buffer.getvalue()))
                 except Exception:
-                    try:
-                        pil_image = Image.open(BytesIO(file_bytes))
-                    except Exception:
-                        continue
+                    pil_image = Image.open(BytesIO(file_bytes))
                 
-                # 가독성과 정확성을 보장하는 다이어트 프롬프트
                 prompt = """
                 Extract English text from this image perfectly.
                 - Add '[HEADING]' right before any titles or headers.
@@ -144,88 +120,59 @@ try:
                 - Remove all line numbers and keep paragraphs continuous.
                 """
 
-                status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능 교사가 지문을 깨끗하게 정렬하는 중...")
+                status_text.text(f"🤖 [{idx+1}/{total_files}] 연동된 API 채널을 통해 지문 판독 중...")
                 
                 try:
-                    # [핵심 수정] 구글 정식 genai 라이브러리의 인풋 오류 버그를 해결하는 최신 규격 반영
                     response = client.models.generate_content(
                         model=model_name,
                         contents=[prompt, pil_image]
                     )
                     if response and response.text:
                         extracted_text = response.text
-                        last_extracted_text = extracted_text
-                    
                 except Exception as api_err:
-                    err_str = str(api_err).upper()
-                    if any(x in err_str for x in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT_EXCEEDED"]):
-                        quota_blocked = True
-                        break
+                    # 필터링 없이 리얼 시스템 에러 원본 그대로 획득
+                    raw_error_message = str(api_err)
+                    break
 
-                if quota_blocked:
+                if raw_error_message:
                     break
 
                 if extracted_text:
-                    try:
-                        success_count += 1
+                    success_count += 1
+                    doc.add_paragraph(f"▪ Source: {file.name}").runs[0].font.color.rgb = RGBColor(128, 128, 128)
+                    
+                    for para_text in extracted_text.split('\n'):
+                        clean_text = para_text.strip()
+                        if not clean_text:
+                            continue
                         
-                        p_src = doc.add_paragraph()
-                        r_src = p_src.add_run(f"▪ Source: {file.name}")
-                        r_src.font.size = Pt(10)
-                        r_src.font.color.rgb = RGBColor(128, 128, 128)  
-                        
-                        paragraphs = extracted_text.split('\n')
-                        for para_text in paragraphs:
-                            clean_text = para_text.strip()
-                            if not clean_text:
-                                continue
-                            
-                            p_tag = doc.add_paragraph()
-                            
-                            if clean_text.startswith("[HEADING]"):
-                                heading_content = clean_text.replace("[HEADING]", "").strip()
-                                run = p_tag.add_run(heading_content)
-                                run.bold = True
-                                run.font.size = Pt(13) 
-                                p_tag.paragraph_format.space_before = Pt(12) 
-                                p_tag.paragraph_format.space_after = Pt(6)   
-                                
-                            elif clean_text.startswith("[NAME]"):
-                                name_content = clean_text.replace("[NAME]", "").strip()
-                                match = re.match(r"^([^:]+:)(.*)$", name_content)
-                                if match:
-                                    name_part = match.group(1)   
-                                    dialogue_part = match.group(2) 
-                                    r_name = p_tag.add_run(name_part)
-                                    r_name.bold = True
-                                    p_tag.add_run(dialogue_part)
-                                else:
-                                    p_tag.add_run(name_content)
-                                    
+                        p_tag = doc.add_paragraph()
+                        if clean_text.startswith("[HEADING]"):
+                            heading_content = clean_text.replace("[HEADING]", "").strip()
+                            run = p_tag.add_run(heading_content)
+                            run.bold = True
+                            run.font.size = Pt(13)
+                        elif clean_text.startswith("[NAME]"):
+                            name_content = clean_text.replace("[NAME]", "").strip()
+                            match = re.match(r"^([^:]+:)(.*)$", name_content)
+                            if match:
+                                r_name = p_tag.add_run(match.group(1))
+                                r_name.bold = True
+                                p_tag.add_run(match.group(2))
                             else:
-                                plain_content = clean_text.replace("**", "")
-                                p_tag.add_run(plain_content)
-                        
-                        if idx < total_files - 1:
-                            doc.add_page_break()
-                                        
-                    except Exception:
-                        continue
+                                p_tag.add_run(name_content)
+                        else:
+                            p_tag.add_run(clean_text.replace("**", ""))
+                    
+                    if idx < total_files - 1:
+                        doc.add_page_break()
                 
-                for p in range(mid_p + 1, min(end_p, 99) + 1):
-                    percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
-                    progress_bar.progress(p / 100.0)
-                    time.sleep(0.01)
+                progress_bar.progress(int((idx + 1) * progress_per_file) / 100.0)
 
-            # 3. 문서 정렬 작업 완수 후 최종 출력
+            # 결과 처리 바인딩
             if success_count > 0:
-                for p in range(int(progress_bar.progress * 100), 101):
-                    percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
-                    progress_bar.progress(p / 100.0)
-                    time.sleep(0.005)
-                
                 percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 완료: 100%</p>', unsafe_allow_html=True)
-                status_text.text("🎉 버그 매핑 우회에 성공하여 고품질 워드 문서가 생성되었습니다!")
+                status_text.text("🎉 새 API 연동 채널을 통해 문서 전송 및 정렬 작업이 정상 완료되었습니다!")
 
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
@@ -237,11 +184,11 @@ try:
                     file_name="Converted_English_Texts.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
-                
             else:
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("⚠️ 구글 API 무료 제한 한도가 도달했습니다. 약 1~2분 정도 뒤에 'Word 파일로 변환하기' 버튼을 다시 한번 꾹 클릭해 주세요.")
+                # 고정 경고를 지우고 실제 시스템 에러 로그를 명확히 바인딩
+                st.error(f"❌ 구글 통신 장애 발생! 구글 서버가 반환한 리얼 메시지입니다:\n\n`{raw_error_message}`")
 
 except KeyError:
-    st.error("🔒 설정 오류: 프로그램 관리자 설정(Streamlit Secrets)에 구글 인증키가 올바르게 등록되지 않았습니다.")
+    st.error("🔒 설정 오류: Secrets 관리자 화면에 GEMINI_API_KEY 설정이 되어있는지 다시 확인해 주세요.")
