@@ -147,9 +147,16 @@ try:
                 
                 for attempt in range(max_retries):
                     try:
+                        # 🛠️ [결정적 버그 수정] Google GenAI SDK 표준 이미지 바이트 딕셔너리 포맷으로 변경
+                        # 기존 types.Part.from_bytes 규격 오류로 인한 API 강제 에러 드랍 차단
+                        image_part = {
+                            "mime_type": file.type,
+                            "data": image_bytes
+                        }
+                        
                         response = client.models.generate_content(
                             model=model_name,
-                            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.type), prompt]
+                            contents=[image_part, prompt]
                         )
                         
                         extracted_text = response.text
@@ -164,7 +171,7 @@ try:
                         
                     except (APIError, ClientError, ServerError) as e:
                         error_str = str(e).upper()
-                        if "LIMIT: 20" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str:
+                        if "LIMIT" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str:
                             quota_blocked = True
                             break
                             
@@ -175,9 +182,7 @@ try:
                         else:
                             api_failed_completely = True
                             
-                # [버그 수정 핵심 1] 중간에 한도가 초과되었을 때의 처리 흐름 세분화
                 if quota_blocked:
-                    # 이전에 성공적으로 변환해 둔 파일이 '최소 1개 이상' 있을 때만 이 경고창을 띄웁니다.
                     if success_count > 0:
                         st.warning("⚠️ 하루 이용 한도를 모두 소진했습니다. 현재까지 성공한 지문들로만 워드 문서를 저장합니다.")
                     break
@@ -247,7 +252,6 @@ try:
                             status_text.text(f"⏳ 다음 지문을 가져오는 중입니다.. ({sec_left}초)")
                             time.sleep(0.1)
 
-            # [버그 수정 핵심 2] UI 최종 렌더링 조건문 완벽 분리
             if success_count > 0:
                 if not quota_blocked:
                     percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
@@ -268,9 +272,7 @@ try:
                 st.markdown('</div>', unsafe_allow_html=True)
                 
             else:
-                # 성공 개수가 0개이면서 한도가 끝난 경우에는 명확하게 분홍색 알림만 단 한 개 띄웁니다.
                 if quota_blocked:
-                    # 상단의 로딩 텍스트 잔상을 깨끗하게 지워줍니다.
                     status_text.empty()
                     st.error("⚠️ 오늘 제공되는 구글의 무료 변환 한도가 모두 소진되어 지금은 변환을 시작할 수 없습니다. 내일 다시 이용해 주세요.")
                 else:
