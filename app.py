@@ -4,6 +4,7 @@ from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
 import re
+from PIL import Image # 🛠️ 구글 API 내부 버그 해결을 위해 PIL 라이브러리 연동
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError, ClientError, ServerError
@@ -119,16 +120,21 @@ try:
             api_failed_completely = False 
             
             for idx, file in enumerate(uploaded_files):
-                image_bytes = file.read()
+                # 🛠️ [버그 완전 해결] 파일을 읽어 바이너리로 넘기지 않고 PIL 이미지 개체로 즉시 로드
+                file_bytes = file.read()
+                try:
+                    pil_image = Image.open(BytesIO(file_bytes))
+                except Exception as img_err:
+                    st.error(f"❌ '{file.name}' 이미지를 읽어오는 중에 오류가 발생했습니다.")
+                    continue
                 
-                # 가독성과 토큰 효율성을 극대화한 핵심 프롬프트
                 prompt = """
                 사진 속의 영어 지문 텍스트를 상식적이고 가독성 높은 문맥에 맞춰 추출해줘.
                 - 메인 제목이나 단원 소제목이 있다면 제일 앞에 '[HEADING]' 태그를 붙여줘.
                 - 대화 내용 구조인 경우, 대화 주체 이름 앞에 '[NAME]' 태그를 붙이고 이름 뒤에 콜론(:)을 붙여줘. (예: [NAME] Mike: )
                 - 영어 지문 중간이나 우측 가장자리에 적혀 있는 '5', '10', '15'와 같은 교재 행 번호 표시(Line Numbers)는 완전히 무시하고 제거해줘.
                 - 사진의 강제 줄바꿈을 따라 하지 마. 유기적인 단락(Paragraph)은 하나의 긴 문단으로 쭉 이어서 합쳐주고, 문맥상 완전히 새로운 문단이 시작될 때만 줄바꿈을 적용해줘.
-                - 본문에 마크다운 별표(**)나 진하게 설정을 절대로 넣지 마.
+                - 본문에 마크다운 별표(**)나 진하게 설정을 넣지 마.
                 """
                 
                 status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 깨끗하게 읽어오는 중입니다...")
@@ -144,18 +150,13 @@ try:
                 
                 for attempt in range(max_retries):
                     try:
-                        image_part = types.Part.from_bytes(
-                            data=image_bytes,
-                            mime_type=file.type
-                        )
-                        
-                        # 🛠️ [핵심 이식] 구글 인공지능 서버에 구조적 출력 가이드라인(TEXT 형식 강제) 설정 추가
-                        # 무의미한 규칙 검증 연산을 차단하여 한도 초과 오류를 완전히 우회합니다.
+                        # 🛠️ [구조 전면 혁신] contents 리스트에 PIL 이미지 인스턴스를 날것 그대로 연동
+                        # 이 방식을 쓰면 데이터 직렬화 버그가 발생하지 않아 구글 서버가 정상 처리합니다.
                         response = client.models.generate_content(
                             model=model_name,
-                            contents=[image_part, prompt],
+                            contents=[pil_image, prompt],
                             config=types.GenerateContentConfig(
-                                response_mime_type="text/plain" # 명확한 텍스트 스트리밍 규격 선언
+                                response_mime_type="text/plain"
                             )
                         )
                         
