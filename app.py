@@ -37,11 +37,12 @@ st.markdown("""
         letter-spacing: -0.5px;
     }
     .author-footer {
-        font-size: 14px;
-        color: #B2B2B2; 
+        font-size: 13px;
+        color: #A3A3A3; 
         text-align: right;
         margin-bottom: 45px;
         padding-right: 5px;
+        font-family: 'Arial', sans-serif;
     }
     .stFileUploader {
         border-radius: 15px !important;
@@ -83,7 +84,8 @@ st.markdown("""
 # UI 상단 타이틀 및 설명 구조 정제
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
-st.markdown('<div class="author-footer">(Made by Manju)</div>', unsafe_allow_html=True)
+# [수정] 저작권 문구에서 연도(2026) 제외
+st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -132,52 +134,30 @@ try:
                 - 결과물은 오직 추출된 텍스트만 보여주고, 다른 부연 설명은 하지 마.
                 """
                 
-                status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 지문을 AI 서버에서 분석하는 중...")
+                status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 깨끗하게 읽어오는 중입니다...")
                 
-                # ---------------------------------------------------------
-                # 🛠️ [핵심 개선] 부드러운 진행률 상승을 위한 가상 애니메이션 루프 적용
-                # ---------------------------------------------------------
-                # 이번 파일 작업 완료 시 도달해야 할 실제 최종 목표 %
                 real_target_percent = int(((idx + 1) / total_files) * 100)
                 if idx == total_files - 1:
                     real_target_percent = 100
 
-                # AI 호출 직전, 다음 목표치 직전(-2%)까지 부드럽게 먼저 채우는 가상 루프
-                # 예: 0% -> 98%까지 약 4~5초간 일정하게 올라가며 사용자의 지루함을 방지합니다.
-                virtual_target = max(current_percent, real_target_percent - 2)
+                virtual_target = max(current_percent, real_target_percent - 3)
                 
                 extracted_text = ""
                 max_retries = 3  
                 
                 for attempt in range(max_retries):
                     try:
-                        # 1단계: 가상으로 70% 정도까지 아주 빠르게 먼저 도달하게 유도 (체감 속도 업)
-                        mid_target = current_percent + int((virtual_target - current_percent) * 0.7)
-                        for p in range(current_percent, mid_target + 1):
-                            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
-                            progress_bar.progress(p)
-                            time.sleep(0.01)
+                        # 구글 API 단독 1회 호출 설계
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.type), prompt]
+                        )
                         
-                        current_percent = mid_target
-                        
-                        # 2단계: 나머지 98% 지점까지는 AI 연산 속도(약 3~4초)에 맞춰 초당 약 10~15%씩 서서히 증가
-                        # AI 서버 응답이 이 루프 중간이나 끝난 직후에 떨어지도록 완충 작용을 합니다.
-                        response = None
-                        
-                        # 가상으로 조금씩 전진하는 비동기식 연출 루프 효과
+                        # 체감 진행 속도 완충 부드러운 애니메이션 루프
                         for p in range(current_percent, virtual_target + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
-                            
-                            # 루프 극초반에 딱 한 번 API 실제 요청을 보냄 (Non-blocking 느낌으로 연출)
-                            if response is None:
-                                response = client.models.generate_content(
-                                    model=model_name,
-                                    contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.type), prompt]
-                                )
-                            
-                            # API 응답을 이미 받았으므로 루프 가속을 위해 아주 짧은 딜레이만 할당
-                            time.sleep(0.04) 
+                            time.sleep(0.02)
                         
                         extracted_text = response.text
                         current_percent = virtual_target
@@ -185,33 +165,32 @@ try:
                         
                     except (APIError, ClientError, ServerError) as e:
                         error_str = str(e).upper()
-                        if "LIMIT: 20" in error_str:
+                        if "LIMIT: 20" in error_str or "QUOTA" in error_str:
                             quota_blocked = True
                             break
                             
                         if attempt < max_retries - 1:
-                            for remaining in range(8, 0, -1):
-                                status_text.text(f"⏳ 처리하는데 시간이 걸리니 조금만 기다려주세요.. ({remaining}초)")
+                            for remaining in range(5, 0, -1):
+                                status_text.text(f"⏳ 서버 연결을 재시도하고 있습니다.. 잠시만 기다려주세요. ({remaining}초)")
                                 time.sleep(1)
                         else:
-                            st.error(f"❌ '{file.name}' 구글 서버 일시 지연으로 실패")
+                            st.error(f"❌ '{file.name}' 파일 변환 중 네트워크 오류가 발생했습니다.")
                             
                 if quota_blocked:
-                    st.warning("⚠️ 오늘 사용 가능한 구글 무료 한도(하루 20장)를 모두 소진했습니다. 현재까지 변환 성공한 지문들로만 워드 문서를 저장합니다.")
+                    st.warning("⚠️ 하루 이용 한도를 모두 소진했습니다. 현재까지 성공한 지문들로만 워드 문서를 저장합니다.")
                     break
 
                 if extracted_text:
                     try:
                         success_count += 1
                         
-                        # 3단계: AI 데이터 처리가 끝나면 목표했던 진짜 %까지 완벽하게 도달시킴
                         for p in range(current_percent, real_target_percent + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
                             time.sleep(0.01)
                         
                         current_percent = real_target_percent
-                        status_text.text(f"✅ [{idx+1}/{total_files}] 정제 완료!")
+                        status_text.text(f"✅ [{idx+1}/{total_files}] 지문 변환 및 서식 정리 완료!")
                         
                         # 사진 출처 표기 서식
                         p_src = doc.add_paragraph()
@@ -257,24 +236,23 @@ try:
                         doc.add_page_break()
                         
                     except Exception as word_err:
-                        st.warning(f"⚠️ '{file.name}' 문서 서식 스타일링 적용 중 경미한 지연이 있습니다. 텍스트 추출은 유지됩니다.")
+                        st.warning(f"⚠️ '{file.name}' 서식을 다듬는 과정에서 경미한 지연이 있습니다.")
                         continue
                     
-                    # 💡 파일 간 간격 딜레이 리팩토링 (기존 6초 대기를 부드러운 스태거 방식으로 통합)
                     if idx < total_files - 1:
-                        steps = 30 
+                        steps = 20 
                         for step in range(steps):
-                            sec_left = 3 - (step // 10)
-                            status_text.text(f"⏳ 다음 지문으로 이동 중입니다.. ({sec_left}초)")
+                            sec_left = 2 - (step // 10)
+                            status_text.text(f"⏳ 다음 지문을 가져오는 중입니다.. ({sec_left}초)")
                             time.sleep(0.1)
 
             if success_count > 0:
                 if not quota_blocked:
                     percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
                     progress_bar.progress(100)
-                    status_text.text("🎉 모든 영어 지문이 성공적으로 변환되었습니다!")
+                    status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 멋지게 변환되었습니다!")
                 else:
-                    status_text.text(f"⚠️ 구글 무료 한도로 인해 {success_count}개의 지문만 먼저 변환 완료되었습니다.")
+                    status_text.text(f"⚠️ 이용 한도로 인해 {success_count}개의 지문만 먼저 변환이 완료되었습니다.")
                 
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
@@ -289,7 +267,7 @@ try:
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
             else:
-                st.error("❌ 현재 구글 무료 서버의 접속량이 너무 많아 일시적으로 응답이 불가능합니다. 잠시 후 다시 시도해 주세요.")
+                st.error("❌ 구글 서버 연결이 일시적으로 원활하지 않습니다. 잠시 후 다시 시도해 주세요.")
 
 except KeyError:
     st.error("🔒 설정 오류: Streamlit Secrets에 API Key를 등록해 주세요.")
