@@ -9,12 +9,14 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
+# 1. 페이지 기본 설정 및 디자인
 st.set_page_config(
     page_title="Image To Text in English",
     page_icon="📝",
     layout="centered"
 )
 
+# 세련되고 직관적인 커스텀 CSS
 st.markdown("""
     <style>
     .stApp { background-color: #FDFBF6; }
@@ -62,20 +64,18 @@ st.markdown("""
         box-shadow: 0 2px 6px rgba(0,0,0,0.05);
     }
     div.stButton > button:first-child:hover { background-color: #7E8F83; }
-    .status-box {
-        padding: 25px;
-        border-radius: 20px;
-        background-color: white;
-        margin-top: 30px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
-        text-align: center;
-    }
     .percent-text {
         font-size: 20px;
         font-weight: 700;
         color: #5C715E;
         margin-bottom: 8px;
         text-align: left;
+    }
+    /* 다운로드 버튼 중앙 정렬용 스타일 */
+    .download-wrapper {
+        display: flex;
+        justify-content: center;
+        margin-top: 25px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -117,9 +117,25 @@ try:
             quota_blocked = False
             last_extracted_text = "" 
             
+            # 파일당 할당할 진행률 범위를 계산
+            progress_per_file = 100 / total_files
+            
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
                 extracted_text = "" 
+                
+                # 현재 파일의 진행률 시작점과 끝점 계산
+                file_start_progress = idx * progress_per_file
+                file_end_progress = (idx + 1) * progress_per_file
+                
+                # 1단계: 이미지 로드 및 분석 대기 단계 부드러운 전진 (해당 파일 할당량의 0% -> 40% 지점까지)
+                status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 데이터를 준비 중입니다...")
+                step1_end = int(file_start_progress + (progress_per_file * 0.4))
+                
+                for p in range(int(file_start_progress), step1_end + 1):
+                    percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
+                    progress_bar.progress(p / 100.0)
+                    time.sleep(0.01)
                 
                 try:
                     raw_img = Image.open(BytesIO(file_bytes))
@@ -147,18 +163,16 @@ try:
                 - No markdown. Output ONLY raw extracted text.
                 """
                 
-                status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 분석 중입니다...")
+                status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 인공지능이 영어 지문을 판독 중입니다...")
                 
-                current_percent = int((idx / total_files) * 100)
-                target_percent = int(((idx + 1) / total_files) * 100)
-                
-                for p in range(current_percent, min(target_percent, current_percent + 5)):
+                # 2단계: API 서버 통신 단계 가상 서행 (해당 파일 할당량의 40% -> 75% 지점까지 부드럽게 대기 효과)
+                step2_end = int(file_start_progress + (progress_per_file * 0.75))
+                for p in range(step1_end, step2_end + 1):
                     percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
-                    progress_bar.progress(p)
-                    time.sleep(0.02)
+                    progress_bar.progress(p / 100.0)
+                    time.sleep(0.03)
 
                 max_retries = 3
-                
                 for attempt in range(max_retries):
                     try:
                         response = client.models.generate_content(
@@ -172,8 +186,6 @@ try:
                         
                     except Exception as api_err:
                         error_msg = str(api_err).upper()
-                        
-                        # 429 외에도 구글 서버 감지 한도 오류 단어 추가 방어
                         if any(x in error_msg for x in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT_EXCEEDED"]):
                             quota_blocked = True
                             break 
@@ -192,13 +204,13 @@ try:
                 if extracted_text:
                     try:
                         success_count += 1
+                        status_text.text(f"✅ [{idx+1}/{total_files}] 지문 분석 완료! 워드 서식을 구성하고 있습니다...")
                         
-                        for p in range(min(target_percent, current_percent + 5), target_percent + 1):
-                            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
-                            progress_bar.progress(p)
+                        # 3단계: 워드 문서 빌드 및 최종 마무리 (75% -> 100% 목표 지점 도달)
+                        for p in range(step2_end, int(file_end_progress) + 1):
+                            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {min(p, 99)}%</p>', unsafe_allow_html=True)
+                            progress_bar.progress(min(p, 99) / 100.0)
                             time.sleep(0.01)
-                        
-                        status_text.text(f"✅ [{idx+1}/{total_files}] 지문 변환 및 서식 정리 완료!")
                         
                         p_src = doc.add_paragraph()
                         r_src = p_src.add_run(f"▪ Source: {file.name}")
@@ -245,28 +257,29 @@ try:
                         continue
                     
                     if idx < total_files - 1:
-                        time.sleep(1.0)
+                        time.sleep(0.5)
 
+            # 모든 루프 완료 후 최종 화면 연출
             if success_count > 0:
                 if quota_blocked:
                     st.warning("⚠️ 하루 무료 제공량이 모두 소진되어 작업이 중단되었습니다. 현재까지 성공적으로 변환된 파일만 저장합니다.")
                 else:
+                    # 완벽하게 100% 매핑 고정
                     percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
-                    progress_bar.progress(100)
+                    progress_bar.progress(1.0)
                     status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 완성되었습니다!")
                 
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
                 docx_buffer.seek(0)
                 
-                st.markdown('<div class="status-box">', unsafe_allow_html=True)
+                # 불필요한 흰색 박스를 완전히 걷어내고 깔끔하게 다운로드 버튼 배치
                 st.download_button(
                     label="📥 변환된 Word 파일 다운로드",
                     data=docx_buffer,
                     file_name="Converted_English_Texts.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
-                st.markdown('</div>', unsafe_allow_html=True)
                 
             elif quota_blocked and success_count == 0:
                 status_text.empty()
