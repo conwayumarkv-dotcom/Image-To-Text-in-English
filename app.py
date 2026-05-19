@@ -100,10 +100,15 @@ try:
             style._element.rPr.get_or_add_rFonts().set(qn('w:hAnsi'), 'Arial')
             style.font.size = Pt(11)
             
-            # 레이아웃 고정용 빈 칸 확보
+            # 버튼 클릭과 동시에 시각적 요소를 즉시 화면에 배치
             percent_display = st.empty()  
             progress_bar = st.progress(0)  
             status_text = st.empty()       
+            
+            # 초기 상태 즉시 갱신
+            percent_display.markdown('<p class="percent-text">⏳ 문서 생성률: 0%</p>', unsafe_allow_html=True)
+            progress_bar.progress(0.0)
+            status_text.text("🔄 인공지능 교사가 지문 판독을 시작합니다. 잠시만 기다려주세요...")
             
             total_files = len(uploaded_files)
             model_name = 'gemini-2.5-flash'
@@ -113,12 +118,25 @@ try:
             api_error_occurred = False
             last_extracted_text = "" 
             
-            # --- 1단계: 백그라운드 지문 판독 및 데이터 생성 ---
-            status_text.text("🔄 인공지능 교사가 업로드된 모든 사진을 순서대로 분석하고 있습니다...")
+            # 각 사진 한 장을 처리할 때 대략적으로 소요되는 가상 진행률 범위를 설정하여 등속 전진 유도
+            # 전체 0~100% 구간을 사진별로 분할하여 API가 작동하는 도중에도 바가 지속적으로 전진하도록 구현
+            progress_per_file = 100.0 / total_files
             
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
                 extracted_text = "" 
+                
+                # 현재 지문 처리 시작 위치 계산
+                start_p = int(idx * progress_per_file)
+                mid_p = int((idx + 0.6) * progress_per_file)  # 인공지능 분석 예상 소요 시점
+                end_p = int((idx + 1) * progress_per_file)    # 문서 조립 완료 예상 시점
+                
+                # 사진 로드 및 분석 요청 전 단계 전진
+                status_text.text(f"📝 [{idx+1}/{total_files}] '{file.name}' 파일을 읽어오는 중입니다...")
+                for p in range(start_p, min(mid_p, 99) + 1):
+                    percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
+                    progress_bar.progress(p / 100.0)
+                    time.sleep(0.02) # 균일한 속도감을 위한 타임 딜레이
                 
                 try:
                     raw_img = Image.open(BytesIO(file_bytes))
@@ -145,6 +163,9 @@ try:
                 - No markdown. Output ONLY raw extracted text.
                 """
 
+                status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능이 영어 지문을 해석하고 정렬하고 있습니다...")
+                
+                # API 호출 도중에도 멈추지 않고 미세하게 전진하는 연출 (최대 다음 장 한도 전까지)
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
@@ -165,7 +186,7 @@ try:
                             
                         api_error_occurred = True
                         if attempt < max_retries - 1:
-                            time.sleep(1.5)
+                            time.sleep(1.0)
                             continue
                         else:
                             break
@@ -173,6 +194,7 @@ try:
                 if quota_blocked:
                     break
 
+                # 지문 분석 결과 반영 및 워드 서식 빌더 단계 전진
                 if extracted_text:
                     try:
                         success_count += 1
@@ -219,20 +241,24 @@ try:
                                         
                     except Exception:
                         continue
-
-            # --- 2단계: 일정한 속도로 완벽하게 차오르는 게이지 연출 ---
-            if success_count > 0:
-                # 사진 장수와 관계없이 처음부터 끝까지 완전한 동일 속도(주기 0.01초)로 0%~100% 실행
-                for p in range(0, 101):
-                    if p == 100:
-                        percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 완료: 100%</p>', unsafe_allow_html=True)
-                        status_text.text("🎉 모든 영어 지문이 깨끗한 워드 파일 문서로 완성되었습니다!")
-                    else:
-                        percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
-                        status_text.text("📝 줄바꿈을 깔끔하게 정렬하고 워드 문서 서식을 구성하는 중입니다...")
-                    
+                
+                # 분석이 끝난 시점부터 해당 사진의 마무리 목표 지점까지 부드럽게 채우기
+                for p in range(mid_p + 1, min(end_p, 99) + 1):
+                    percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p / 100.0)
-                    time.sleep(0.01) # 등속 애니메이션 구현을 위한 고정 딜레이
+                    time.sleep(0.01)
+
+            # --- 3단계: 최종 완료 화면 연출 ---
+            if success_count > 0:
+                # 마지막 남은 공백 게이지를 100%까지 깔끔하게 밀어 올려 마무리
+                current_p = int(progress_bar.progress) if hasattr(progress_bar, 'progress') else 90
+                for p in range(current_p, 101):
+                    percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
+                    progress_bar.progress(p / 100.0)
+                    time.sleep(0.005)
+                
+                percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 완료: 100%</p>', unsafe_allow_html=True)
+                status_text.text("🎉 모든 영어 지문이 깨끗한 워드 파일 문서로 완성되었습니다!")
                 
                 if quota_blocked:
                     st.warning("⚠️ 오늘 준비된 무료 사용량이 도중에 소진되어, 판독에 성공한 지문들 위주로 우선 정렬되었습니다.")
@@ -249,10 +275,16 @@ try:
                 )
                 
             elif quota_blocked and success_count == 0:
+                percent_display.empty()
+                progress_bar.empty()
                 st.error("⚠️ 오늘 제공되는 구글 인공지능의 하루 무료 한도를 모두 소진했습니다. 내일 다시 시도하시거나 유료 API 계정 전환이 필요합니다.")
             elif api_error_occurred:
+                percent_display.empty()
+                progress_bar.empty()
                 st.error("❌ 구글 인공지능 서버 연결이 원활하지 않습니다. 인터넷 연결을 확인하시거나 잠시 후 다시 시도해 주세요.")
             elif not last_extracted_text: 
+                percent_display.empty()
+                progress_bar.empty()
                 st.error("❌ 사진에서 영어 글자를 전혀 찾지 못했습니다. 사진이 흐리거나 어둡지 않은지 확인 후 다시 업로드해 주세요.")
 
 except KeyError:
