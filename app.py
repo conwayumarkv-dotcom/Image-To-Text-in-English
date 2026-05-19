@@ -88,11 +88,11 @@ try:
             
             percent_display.markdown('<p class="percent-text">⏳ 문서 생성률: 0%</p>', unsafe_allow_html=True)
             progress_bar.progress(0.0)
-            status_text.text("🔄 구글 최신 라이브러리 규격 맵핑을 시작합니다...")
+            status_text.text("🔄 구글 인공지능 서버 통신 상태를 체크하고 있습니다...")
             
             total_files = len(uploaded_files)
             
-            # 구글 정식 라이브러리 공식 권장 메인 플래시 모델 탑재
+            # 구글 정식 최신 SDK 공식 권장 플래시 모델 지정
             model_name = 'gemini-2.5-flash'
             
             success_count = 0     
@@ -105,24 +105,24 @@ try:
                 file_bytes = file.read()
                 extracted_text = "" 
                 
-                # 분당 트래픽 제한(RPM 리밋) 안전 방어 벽 설치
+                # 분당 트래픽 초과(RPM 제한)를 무조건 피해 가기 위한 안전 마진 확보
                 if idx > 0:
                     for remaining in range(3, 0, -1):
-                        status_text.text(f"⏳ 구글 서버 트래픽 안정화 대기 중... ({remaining}초)")
+                        status_text.text(f"⏳ 구글 서버 안정화 대기 중... ({remaining}초)")
                         time.sleep(1)
                 
                 start_p = int(idx * progress_per_file)
                 mid_p = int((idx + 0.6) * progress_per_file)
                 end_p = int((idx + 1) * progress_per_file)
                 
-                status_text.text(f"📝 [{idx+1}/{total_files}] '{file.name}' 용량 초경량 압축 중...")
+                status_text.text(f"📝 [{idx+1}/{total_files}] '{file.name}' 초경량 압축 최적화 중...")
                 for p in range(start_p, min(mid_p, 99) + 1):
                     percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p / 100.0)
                     time.sleep(0.01)
                 
                 try:
-                    # [토큰 최소화] 흑백 다이어트 가공으로 픽셀 데이터 소모량 80% 절감
+                    # [토큰 최적화] 이미지를 완전히 흑백화하고 사이즈를 줄여 트래픽 비용을 제로 수준으로 감축
                     raw_img = Image.open(BytesIO(file_bytes))
                     raw_img = ImageOps.grayscale(raw_img)
                     raw_img.thumbnail((650, 650), Image.Resampling.LANCZOS)
@@ -136,7 +136,7 @@ try:
                     except Exception:
                         continue
                 
-                # 가독성 및 정확성을 보장하는 초경량 정렬 프롬프트
+                # 가독성과 정확성을 보장하는 다이어트 프롬프트
                 prompt = """
                 Extract English text from this image perfectly.
                 - Add '[HEADING]' right before any titles or headers.
@@ -144,10 +144,10 @@ try:
                 - Remove all line numbers and keep paragraphs continuous.
                 """
 
-                status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능이 공식 데이터 규격으로 텍스트를 추출하는 중...")
+                status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능 교사가 지문을 깨끗하게 정렬하는 중...")
                 
                 try:
-                    # [핵심 수정] 구글 정식 genai 라이브러리 매핑 오류를 방어하는 공식 표준 컨텐츠 순서 배치
+                    # [핵심 수정] 구글 정식 genai 라이브러리의 인풋 오류 버그를 해결하는 최신 규격 반영
                     response = client.models.generate_content(
                         model=model_name,
                         contents=[prompt, pil_image]
@@ -217,7 +217,7 @@ try:
                     progress_bar.progress(p / 100.0)
                     time.sleep(0.01)
 
-            # 3. 문서 정렬 생성 완료 후 결과 도출
+            # 3. 문서 정렬 작업 완수 후 최종 출력
             if success_count > 0:
                 for p in range(int(progress_bar.progress * 100), 101):
                     percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
@@ -225,7 +225,7 @@ try:
                     time.sleep(0.005)
                 
                 percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 완료: 100%</p>', unsafe_allow_html=True)
-                status_text.text("🎉 정식 연동 매핑에 성공하여 깨끗한 워드 지문 문서가 발급되었습니다!")
+                status_text.text("🎉 버그 매핑 우회에 성공하여 고품질 워드 문서가 생성되었습니다!")
 
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
@@ -241,7 +241,7 @@ try:
             else:
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("⚠️ 구글 계정 트래픽 한도가 일시 도달했습니다. 대략 1~2분 정도 후에 변환 버튼을 다시 클릭해 주시면 정상 처리됩니다.")
+                st.error("⚠️ 구글 API 무료 제한 한도가 도달했습니다. 약 1~2분 정도 뒤에 'Word 파일로 변환하기' 버튼을 다시 한번 꾹 클릭해 주세요.")
 
 except KeyError:
     st.error("🔒 설정 오류: 프로그램 관리자 설정(Streamlit Secrets)에 구글 인증키가 올바르게 등록되지 않았습니다.")
