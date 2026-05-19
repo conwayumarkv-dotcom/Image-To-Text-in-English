@@ -4,8 +4,8 @@ from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
 import re
-import threading  # 🛠️ 비동기 API 요청 및 중복 리런 방지를 위한 라이브러리
-from PIL import Image  # 🛠️ 이미지 직렬화 검증 오류(Pydantic) 차단을 위한 라이브러리
+import threading  # 🛠️ 중복 API 호출 방지를 위한 스레드 라이브러리
+from PIL import Image  # 🛠️ 이미지 최적화를 위한 라이브러리
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError, ClientError, ServerError
@@ -88,7 +88,7 @@ st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_h
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
 st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
-# 🛠️ 백그라운드 스레드에서 안정적으로 구글 API를 단 1회 호출하는 헬퍼 함수
+# 🛠️ 백그라운드 스레드에서 구글 API를 호출하는 안전 워커 함수
 def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
     max_retries = 3
     for attempt in range(max_retries):
@@ -102,7 +102,7 @@ def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
             return
         except Exception as e:
             error_str = str(e).upper()
-            if ("LIMIT" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str):
+            if "LIMIT" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str:
                 result_container["status"] = "quota_error"
                 return
             if attempt < max_retries - 1:
@@ -147,12 +147,22 @@ try:
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
                 
-                # 🛠️ PIL을 통한 안전한 이미지 로딩 전처리 (Pydantic 에러 예방)
+                # 🛠️ 고용량 사진 데이터 해상도 다운샘플링 최적화 (토큰 오버헤드 방지)
                 try:
-                    pil_image = Image.open(BytesIO(file_bytes))
+                    raw_img = Image.open(BytesIO(file_bytes))
+                    if raw_img.mode != 'RGB':
+                        raw_img = raw_img.convert('RGB')
+                    raw_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+                    
+                    compressed_buffer = BytesIO()
+                    raw_img.save(compressed_buffer, format="JPEG", quality=80)
+                    pil_image = Image.open(BytesIO(compressed_buffer.getvalue()))
                 except Exception:
-                    st.error(f"❌ '{file.name}' 이미지를 읽어오는 과정에서 오류가 발생했습니다.")
-                    continue
+                    try:
+                        pil_image = Image.open(BytesIO(file_bytes))
+                    except Exception:
+                        st.error(f"❌ '{file.name}' 이미지를 읽어오는 과정에서 오류가 발생했습니다.")
+                        continue
                 
                 prompt = """
                 이 사진 속의 영어 지문 텍스트를 상식적이고 가독성 높은 문맥에 맞춰 추출해줘.
@@ -167,7 +177,6 @@ try:
                 - 결과물은 오직 추출된 텍스트만 보여주고, 다른 부연 설명은 하지 마.
                 """
                 
-                # 선생님을 위한 부드러운 한글 비즈니스 알림 문구
                 status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 깨끗하게 읽어오는 중입니다...")
                 
                 real_target_percent = int(((idx + 1) / total_files) * 100)
@@ -178,14 +187,14 @@ try:
                 
                 worker_result = {"status": "pending", "text": None, "error": None}
                 
-                # 🛠️ 백그라운드 스레드 생성 후 실행
+                # 🛠️ 독립된 스레드로 API 가동 (Streamlit Rerun 간섭 완전 차단)
                 api_thread = threading.Thread(
                     target=gemini_api_worker,
                     args=(client, model_name, pil_image, prompt, worker_result)
                 )
                 api_thread.start()
                 
-                # 스레드가 연산하는 동안 가상 퍼센트를 등속으로 올려 시각적 버벅임 해소
+                # AI 분석이 진행되는 동안 게이지를 등속으로 스무스하게 전진시킴
                 ui_progress = float(current_percent)
                 while api_thread.is_alive():
                     if ui_progress < float(virtual_target):
@@ -198,12 +207,11 @@ try:
                 
                 api_thread.join()
                 
-                # 스레드 처리 결과 확인 및 오류 분기
                 if worker_result["status"] == "quota_error":
                     quota_blocked = True
                 elif worker_result["status"] == "fail":
                     api_failed_completely = True
-                    st.error(f"❌ '{file.name}' 지문 변환 과정 중 오류가 발생했습니다: {worker_result['error']}")
+                    st.error(f"❌ '{file.name}' 처리 중 예기치 못한 서버 오류 발생: {worker_result['error']}")
                     break
                 
                 if quota_blocked:
@@ -220,7 +228,6 @@ try:
                     try:
                         success_count += 1
                         
-                        # AI 연산이 끝났으므로 진짜 최종 퍼센트까지 동기화 채우기
                         for p in range(int(ui_progress), real_target_percent + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
@@ -229,7 +236,6 @@ try:
                         current_percent = real_target_percent
                         status_text.text(f"✅ [{idx+1}/{total_files}] 지문 변환 및 서식 정리 완료!")
                         
-                        # 사진 출처 표기 서식
                         p_src = doc.add_paragraph()
                         r_src = p_src.add_run(f"▪ Source: {file.name}")
                         r_src.font.size = Pt(10)
@@ -243,7 +249,6 @@ try:
                             
                             p_tag = doc.add_paragraph()
                             
-                            # 스타일링 1: 소제목/제목 구조 처리
                             if clean_text.startswith("[HEADING]"):
                                 heading_content = clean_text.replace("[HEADING]", "").strip()
                                 run = p_tag.add_run(heading_content)
@@ -252,7 +257,6 @@ try:
                                 p_tag.paragraph_format.space_before = Pt(12) 
                                 p_tag.paragraph_format.space_after = Pt(6)   
                                 
-                            # 스타일링 2: 대화문 주체 구조 처리
                             elif clean_text.startswith("[NAME]"):
                                 name_content = clean_text.replace("[NAME]", "").strip()
                                 match = re.match(r"^([^:]+:)(.*)$", name_content)
@@ -265,15 +269,14 @@ try:
                                 else:
                                     p_tag.add_run(name_content)
                                     
-                            # 스타일링 3: 일반 본문 문장 구조 처리
                             else:
                                 plain_content = clean_text.replace("**", "")
                                 p_tag.add_run(plain_content)
                                         
                         doc.add_page_break()
                         
-                    except Exception as word_err:
-                        st.warning(f"⚠️ '{file.name}' 문서 디자인 조립 중 경미한 지연이 생겨 안전하게 다음으로 패스합니다.")
+                    except Exception:
+                        st.warning(f"⚠️ '{file.name}' 워드 문서 스타일링을 적용하는 과정에서 경미한 지연이 있습니다.")
                         continue
                     
                     if idx < total_files - 1:
