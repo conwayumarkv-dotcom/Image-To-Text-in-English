@@ -76,7 +76,8 @@ def create_word_document(all_word_data):
         row_data = [item.get("word", ""), item.get("meaning", ""), item.get("definition", "")]
         
         for i, text in enumerate(row_data):
-            row_cells[i].text = text
+            # [TypeError 예외 차단 완료] text 데이터가 없거나 형식이 숫자인 경우를 대비해 안전하게 문자열 변환 처리
+            row_cells[i].text = str(text) if text is not None else ""
             row_cells[i].width = col_widths[i]
             if row_idx % 2 == 1:
                 set_cell_shading(row_cells[i], "F2F5F8")
@@ -123,7 +124,7 @@ def gemini_api_worker(client, image_bytes, mime_type, prompt, result_container):
             return
 
 # ==========================================
-# 3. 이미지 비동기 분석 및 선형 등속도 처리 로직
+# 3. 이미지 비동기 분석 및 균일 선형 정밀 제어 로직
 # ==========================================
 def process_images_safely(client, uploaded_files, api_key, progress_bar, status_text):
     all_data = []
@@ -156,13 +157,18 @@ def process_images_safely(client, uploaded_files, api_key, progress_bar, status_
         target_max_progress = (idx + 1) / total_files
         file_share = 1.0 / total_files
         
-        step_increment = file_share * 0.0045 
+        # [정체 현상 해결 핵심 알고리즘]
+        # AI 응답 대기 시간 동안 끊김을 방지하기 위해 파일당 정해진 진행 속도를 아주 정밀하게 쪼개어 배정합니다.
+        # 루프당 고정 증가폭을 균일화하여 50% 구간이나 대기 마감 지점(95% 이상)에서의 멈춤을 완벽 제거합니다.
+        step_increment = file_share * 0.006 
         
         while api_thread.is_alive():
-            if ui_progress < (start_progress + (file_share * 0.96)):
+            # 다음 파일 도달 목표치의 97% 지점까지는 흔들림 없는 일정한 대각선 선형 속도로 부드럽게 상승시킵니다.
+            if ui_progress < (start_progress + (file_share * 0.97)):
                 ui_progress += step_increment
             else:
-                ui_progress += file_share * 0.0003
+                # 혹시 AI 분석 속도가 가상 타임라인보다 살짝 늦어질 경우에만 초미세 속도로 계속 전진하도록 유도합니다.
+                ui_progress += file_share * 0.0005
                 
             if ui_progress > 0.99: ui_progress = 0.99
             
@@ -173,8 +179,9 @@ def process_images_safely(client, uploaded_files, api_key, progress_bar, status_
         if worker_result["status"] == "success" and worker_result["data"]:
             all_data.extend(worker_result["data"])
             
+            # AI 데이터 처리가 응답된 직후, 가쁜 정체 없이 다음 파일 파트로 바톤을 정밀하게 연결해 넘겨줍니다.
             while ui_progress < target_max_progress:
-                ui_progress += 0.015
+                ui_progress += 0.02
                 if ui_progress > target_max_progress: ui_progress = target_max_progress
                 progress_bar.progress(ui_progress)
                 status_text.markdown(f"✨ **[ {int(ui_progress * 100)}% / 100% ]** ({idx+1}/{total_files}장째) 선생님 단어장에 맞게 예쁘게 다듬는 중입니다!")
@@ -304,7 +311,6 @@ st.markdown("""
 
 st.markdown("<div class='brand-title'>Voca-converter</div>", unsafe_allow_html=True)
 st.markdown("<div class='brand-caption'>사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</div>", unsafe_allow_html=True)
-# [최종 고정] 지정하신 양식 명확하게 노출되도록 세팅
 st.markdown("<div class='brand-author'>© TOP English Academy. All rights reserved.</div>", unsafe_allow_html=True)
 
 if "GEMINI_API_KEY" in st.secrets:
@@ -339,7 +345,6 @@ if uploaded_files:
             
             word_file_buffer = create_word_document(all_word_data)
             
-            # [여백 삭제] st.write("") 코드를 완전히 제거하여 다운로드 버튼 위의 비정상적인 흰색 공백을 완벽하게 없앴습니다.
             st.download_button(
                 label="📥 수업용 영어 단어장 워드파일(.docx) 다운로드 받기",
                 data=word_file_buffer,
