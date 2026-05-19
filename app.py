@@ -4,6 +4,7 @@ from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
 import re
+import json
 import threading
 from PIL import Image
 from google import genai
@@ -17,7 +18,6 @@ st.set_page_config(
     layout="centered"
 )
 
-# 세련되고 직관적인 커스텀 CSS (크림/그린 테마 정자체 세팅)
 st.markdown("""
     <style>
     .stApp { background-color: #FDFBF6; }
@@ -87,7 +87,7 @@ st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_h
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
 st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
-# 백그라운드 API 호출 워커 함수
+# 🛠️ [구조 혁신] 단어장 프로그램처럼 JSON 데이터를 안전하게 받아오는 워커 함수
 def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
     max_retries = 3
     for attempt in range(max_retries):
@@ -95,9 +95,12 @@ def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
             response = client.models.generate_content(
                 model=model_name,
                 contents=[pil_image, prompt],
-                config=types.GenerateContentConfig(response_mime_type="text/plain")
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json" # 🟢 단어장과 동일한 구조적 마이그레이션
+                )
             )
-            result_container["text"] = response.text
+            # 결과물을 안전하게 JSON파싱하여 저장
+            result_container["json_data"] = json.loads(response.text)
             result_container["status"] = "success"
             return
         except Exception as e:
@@ -136,9 +139,7 @@ try:
             status_text = st.empty()       
             
             total_files = len(uploaded_files)
-            
-            # 🛠️ [최종 버그 해결의 핵심] 복잡한 지문 분석 연산에 특화된 최고 사양 'pro' 모델로 업그레이드
-            model_name = 'gemini-2.5-pro'
+            model_name = 'gemini-2.5-flash' # 다시 가볍고 빠른 flash 모델로 안정적 구동 가능
             
             current_percent = 0
             success_count = 0     
@@ -153,13 +154,23 @@ try:
                     st.error(f"❌ '{file.name}' 이미지를 읽어오는 중에 오류가 발생했습니다.")
                     continue
                 
+                # 🛠️ AI 오버헤드를 제로로 만드는 초경량 JSON 유도 프롬프트
                 prompt = """
-                사진 속의 영어 지문 텍스트를 상식적이고 가독성 높은 문맥에 맞춰 추출해줘.
-                - 메인 제목이나 단원 소제목이 있다면 제일 앞에 '[HEADING]' 태그를 붙여줘.
-                - 대화 내용 구조인 경우, 대화 주체 이름 앞에 '[NAME]' 태그를 붙이고 이름 뒤에 콜론(:)을 붙여줘.
-                - 영어 지문 중간이나 우측 가장자리에 적혀 있는 '5', '10', '15'와 같은 교재 행 번호 표시(Line Numbers)는 완전히 무시하고 제거해줘.
-                - 사진의 강제 줄바꿈을 따라 하지 마. 유기적인 단락(Paragraph)은 하나의 긴 문단으로 쭉 이어서 합쳐주고, 문맥상 완전히 새로운 문단이 시작될 때만 줄바꿈을 적용해줘.
-                - 본문에 마크다운 별표(**)나 진하게 설정을 넣지 마.
+                Extract the English text from this image and structure it into the following JSON format.
+                - Ignore textbook line numbers like '5', '10', '15'.
+                - Merge split lines into a single, cohesive paragraph. Only start a new paragraph when the story/context naturally changes.
+                - Do NOT include any markdown formatting like '**'.
+                
+                Respond ONLY with a JSON object inside this structure:
+                {
+                  "type": "heading" or "dialogue" or "normal",
+                  "content": [
+                    {
+                      "role": "If type is dialogue, put speaker name here (e.g., Mike). Otherwise leave it empty.",
+                      "text": "The extracted sentence or paragraph text here."
+                    }
+                  ]
+                }
                 """
                 
                 status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 깨끗하게 읽어오는 중입니다...")
@@ -170,7 +181,7 @@ try:
 
                 virtual_target = max(current_percent, real_target_percent - 3)
                 
-                worker_result = {"status": "pending", "text": ""}
+                worker_result = {"status": "pending", "json_data": None}
                 
                 api_thread = threading.Thread(
                     target=gemini_api_worker,
@@ -181,7 +192,7 @@ try:
                 ui_progress = float(current_percent)
                 while api_thread.is_alive():
                     if ui_progress < float(virtual_target):
-                        ui_progress += 0.4
+                        ui_progress += 0.5
                         if ui_progress > float(virtual_target):
                             ui_progress = float(virtual_target)
                         percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {int(ui_progress)}%</p>', unsafe_allow_html=True)
@@ -201,8 +212,8 @@ try:
                 if api_failed_completely:
                     break
 
-                if worker_result["status"] == "success" and worker_result["text"]:
-                    extracted_text = worker_result["text"]
+                if worker_result["status"] == "success" and worker_result["json_data"]:
+                    json_data = worker_result["json_data"]
                     try:
                         success_count += 1
                         
@@ -214,42 +225,38 @@ try:
                         current_percent = real_target_percent
                         status_text.text(f"✅ [{idx+1}/{total_files}] 지문 변환 및 서식 정리 완료!")
                         
+                        # 사진 출처 표기 서식
                         p_src = doc.add_paragraph()
                         r_src = p_src.add_run(f"▪ Source: {file.name}")
                         r_src.font.size = Pt(10)
                         r_src.font.color.rgb = RGBColor(128, 128, 128)  
                         
-                        paragraphs = extracted_text.split('\n')
-                        for para_text in paragraphs:
-                            clean_text = para_text.strip()
-                            if not clean_text:
-                                continue
-                            
+                        # 🛠️ [파이썬 후처리] 깨끗하게 받아온 JSON 데이터를 기반으로 워드 파일 스타일링 조립
+                        text_type = json_data.get("type", "normal")
+                        contents = json_data.get("content", [])
+                        
+                        for item in contents:
                             p_tag = doc.add_paragraph()
-                            
-                            if clean_text.startswith("[HEADING]"):
-                                heading_content = clean_text.replace("[HEADING]", "").strip()
-                                run = p_tag.add_run(heading_content)
+                            item_text = item.get("text", "").strip()
+                            if not item_text:
+                                continue
+                                
+                            if text_type == "heading":
+                                run = p_tag.add_run(item_text)
                                 run.bold = True
                                 run.font.size = Pt(13) 
                                 p_tag.paragraph_format.space_before = Pt(12) 
-                                p_tag.paragraph_format.space_after = Pt(6)   
+                                p_tag.paragraph_format.space_after = Pt(6)
                                 
-                            elif clean_text.startswith("[NAME]"):
-                                name_content = clean_text.replace("[NAME]", "").strip()
-                                match = re.match(r"^([^:]+:)(.*)$", name_content)
-                                if match:
-                                    name_part = match.group(1)   
-                                    dialogue_part = match.group(2) 
-                                    r_name = p_tag.add_run(name_part)
+                            elif text_type == "dialogue":
+                                role = item.get("role", "").strip()
+                                if role:
+                                    r_name = p_tag.add_run(f"{role}: ")
                                     r_name.bold = True
-                                    p_tag.add_run(dialogue_part)
-                                else:
-                                    p_tag.add_run(name_content)
-                                    
+                                p_tag.add_run(item_text)
+                                
                             else:
-                                plain_content = clean_text.replace("**", "")
-                                p_tag.add_run(plain_content)
+                                p_tag.add_run(item_text)
                                         
                         doc.add_page_break()
                         
@@ -258,11 +265,7 @@ try:
                         continue
                     
                     if idx < total_files - 1:
-                        steps = 10 
-                        for step in range(steps):
-                            sec_left = 1 - (step // 10)
-                            status_text.text(f"⏳ 다음 지문을 가져오는 중입니다.. ({sec_left}초)")
-                            time.sleep(0.1)
+                        time.sleep(0.2)
 
             if success_count > 0:
                 if not quota_blocked:
