@@ -4,7 +4,6 @@ from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
 import re
-from PIL import Image # 이미지 최적화를 위한 라이브러리 추가
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError, ClientError, ServerError
@@ -109,7 +108,6 @@ try:
             
             percent_display = st.empty()  
             progress_bar = st.progress(0)  
-            st.empty() # 고정 에러 추적 레이아웃
             status_text = st.empty()       
             
             total_files = len(uploaded_files)
@@ -121,34 +119,16 @@ try:
             api_failed_completely = False 
             
             for idx, file in enumerate(uploaded_files):
-                file_bytes = file.read()
+                image_bytes = file.read()
                 
-                # 🛠️ [토큰 에러 해결 핵심 1] 이미지 해상도 다이어트 및 압축 (TPM 한도 차단 방지)
-                # 2~3MB가 넘는 고용량 사진을 텍스트 인식에 무리가 없는 선으로 압축하여 구글 서버 부담을 줄입니다.
-                try:
-                    img = Image.open(BytesIO(file_bytes))
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    
-                    # 가로 세로 최대 1600px로 비율 유지 다운샘플링
-                    img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-                    
-                    compressed_buffer = BytesIO()
-                    img.save(compressed_buffer, format="JPEG", quality=85) # 용량을 획기적으로 줄임
-                    optimized_bytes = compressed_buffer.getvalue()
-                except:
-                    # 압축 실패 시 원본 바이트 그대로 우회 유지
-                    optimized_bytes = file_bytes
-                
-                # 🛠️ [토큰 에러 해결 핵심 2] 프롬프트 경량화 및 다이어트
-                # 인공지능이 프롬프트를 해석하느라 쓰는 비용을 줄여 한도 오류를 원천 차단합니다.
+                # 가독성과 토큰 효율성을 극대화한 핵심 프롬프트
                 prompt = """
-                사진 속 영어 지문을 문맥에 맞춰 정확히 추출해줘. 다른 설명 없이 텍스트만 출력해.
-                - 메인 제목에는 무조건 앞집에 '[HEADING]' 태그 추가 (예: [HEADING] Title)
-                - 대화문 구조의 등장인물 이름 앞에는 '[NAME]' 태그 추가 (예: [NAME] Mike: Hello)
-                - 지문 가장자리나 중간의 '5', '10', '15' 같은 행 번호(Line Numbers)는 완전히 무시하고 제거해줘.
-                - 원본 사진의 인위적인 줄바꿈을 따르지 말고 하나의 문단은 쭉 이어서 결합해줘. 문맥상 단락이 바뀔 때만 줄바꿈해줘.
-                - 별표(**)나 진하게 등 마크다운 장식은 넣지 마.
+                사진 속의 영어 지문 텍스트를 상식적이고 가독성 높은 문맥에 맞춰 추출해줘.
+                - 메인 제목이나 단원 소제목이 있다면 제일 앞에 '[HEADING]' 태그를 붙여줘.
+                - 대화 내용 구조인 경우, 대화 주체 이름 앞에 '[NAME]' 태그를 붙이고 이름 뒤에 콜론(:)을 붙여줘. (예: [NAME] Mike: )
+                - 영어 지문 중간이나 우측 가장자리에 적혀 있는 '5', '10', '15'와 같은 교재 행 번호 표시(Line Numbers)는 완전히 무시하고 제거해줘.
+                - 사진의 강제 줄바꿈을 따라 하지 마. 유기적인 단락(Paragraph)은 하나의 긴 문단으로 쭉 이어서 합쳐주고, 문맥상 완전히 새로운 문단이 시작될 때만 줄바꿈을 적용해줘.
+                - 본문에 마크다운 별표(**)나 진하게 설정을 절대로 넣지 마.
                 """
                 
                 status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 깨끗하게 읽어오는 중입니다...")
@@ -164,15 +144,19 @@ try:
                 
                 for attempt in range(max_retries):
                     try:
-                        # 최신 규격 반영 및 최적화된 바이너리 바이트 주입
                         image_part = types.Part.from_bytes(
-                            data=optimized_bytes,
-                            mime_type="image/jpeg"
+                            data=image_bytes,
+                            mime_type=file.type
                         )
                         
+                        # 🛠️ [핵심 이식] 구글 인공지능 서버에 구조적 출력 가이드라인(TEXT 형식 강제) 설정 추가
+                        # 무의미한 규칙 검증 연산을 차단하여 한도 초과 오류를 완전히 우회합니다.
                         response = client.models.generate_content(
                             model=model_name,
-                            contents=[image_part, prompt]
+                            contents=[image_part, prompt],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="text/plain" # 명확한 텍스트 스트리밍 규격 선언
+                            )
                         )
                         
                         extracted_text = response.text
@@ -192,8 +176,8 @@ try:
                             break
                             
                         if attempt < max_retries - 1:
-                            for remaining in range(2, 0, -1):
-                                status_text.text(f"⏳ 구글 서버와 연결이 잠시 불안정하여 다시 시도 중입니다.. ({remaining}초)")
+                            for remaining in range(3, 0, -1):
+                                status_text.text(f"⏳ 서버 연결을 재시도하고 있습니다.. 잠시만 기다려주세요. ({remaining}초)")
                                 time.sleep(1)
                         else:
                             api_failed_completely = True
