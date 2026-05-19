@@ -147,7 +147,6 @@ try:
                 
                 for attempt in range(max_retries):
                     try:
-                        # 🛠️ [Pydantic 에러 해결] 최신 google-genai 규격에 맞춰 types.Part 형식을 정확히 지정
                         image_part = types.Part.from_bytes(
                             data=image_bytes,
                             mime_type=file.type
@@ -160,7 +159,6 @@ try:
                         
                         extracted_text = response.text
                         
-                        # 연산 진행률 연출용 루프
                         for p in range(current_percent, virtual_target + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
@@ -171,13 +169,15 @@ try:
                         
                     except (APIError, ClientError, ServerError) as e:
                         error_str = str(e).upper()
+                        # 구글 API 한도 초과 키워드 판정 조건 강화
                         if "LIMIT" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str:
                             quota_blocked = True
                             break
-                            
+                        
+                        # 일시적인 네트워크 오류 등은 2초 쉬고 다시 찌르도록 수정
                         if attempt < max_retries - 1:
-                            for remaining in range(3, 0, -1):
-                                status_text.text(f"⏳ 서버 연결을 재시도하고 있습니다.. 잠시만 기다려주세요. ({remaining}초)")
+                            for remaining in range(2, 0, -1):
+                                status_text.text(f"⏳ 구글 서버와 연결이 잠시 불안정하여 다시 시도 중입니다.. ({remaining}초)")
                                 time.sleep(1)
                         else:
                             api_failed_completely = True
