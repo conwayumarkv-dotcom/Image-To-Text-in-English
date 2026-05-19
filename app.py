@@ -112,7 +112,7 @@ try:
             
             total_files = len(uploaded_files)
             
-            # 🛠️ [핵심 조치] 하루 한도 20장 -> 1,500장으로 대폭 늘어나는 1.5-flash 모델 적용
+            # 하루 1,500장까지 한도가 넉넉한 1.5-flash 모델 적용
             model_name = 'gemini-1.5-flash'
             
             success_count = 0     
@@ -121,7 +121,7 @@ try:
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
                 
-                # 고용량 사진 데이터 전처리 다이어트 유지
+                # 고용량 사진 데이터 전처리 다이어트 (토큰 한도 방어)
                 try:
                     raw_img = Image.open(BytesIO(file_bytes))
                     if raw_img.mode != 'RGB':
@@ -138,7 +138,6 @@ try:
                         st.error(f"❌ '{file.name}' 이미지를 로드하는 과정에서 에러가 발생했습니다.")
                         continue
                 
-                # 🛠️ 출력 텍스트 길이를 최소화하도록 프롬프트 다이어트
                 prompt = """
                 Extract the English text from this image perfectly.
                 Rules:
@@ -160,23 +159,39 @@ try:
                     time.sleep(0.02)
 
                 extracted_text = ""
+                max_retries = 3
                 
-                try:
-                    # 🛠️ temperature를 0.0으로 낮춰 AI의 불필요한 토큰 낭비 연산 억제
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=[pil_image, prompt],
-                        config=types.GenerateContentConfig(temperature=0.0)
-                    )
-                    extracted_text = response.text
-                except Exception as api_err:
-                    error_msg = str(api_err).upper()
-                    if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "QUOTA" in error_msg:
-                        quota_blocked = True
-                        break 
-                    else:
-                        st.error(f"❌ '{file.name}' 구글 서버 연동 중 일시적 오류가 발생했습니다.")
-                        continue
+                # 🛠️ [핵심 개선] 자동 재시도 루프 및 실제 에러 출력기 장착
+                for attempt in range(max_retries):
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=[pil_image, prompt],
+                            config=types.GenerateContentConfig(temperature=0.0)
+                        )
+                        extracted_text = response.text
+                        break # 성공 시 반복문 탈출
+                        
+                    except Exception as api_err:
+                        error_msg = str(api_err).upper()
+                        
+                        # 429 한도 초과 에러는 재시도 없이 즉각 차단
+                        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "QUOTA" in error_msg:
+                            quota_blocked = True
+                            break 
+                            
+                        # 일시적인 네트워크 오류나 503 에러면 최대 3번까지 2초 쉬고 자동 재시도
+                        if attempt < max_retries - 1:
+                            status_text.text(f"⏳ 서버 응답 지연. 다시 연결 중입니다... ({attempt+1}/{max_retries})")
+                            time.sleep(2)
+                            continue
+                        else:
+                            # 3번 모두 실패하면 진짜 에러의 민낯을 출력 (더 이상 '일시적 오류'로 뭉뚱그리지 않음)
+                            st.error(f"❌ '{file.name}' 변환 실패 상세 원인: {str(api_err)}")
+                            break
+
+                if quota_blocked:
+                    break
 
                 if extracted_text:
                     try:
@@ -258,10 +273,10 @@ try:
                 
             elif quota_blocked and success_count == 0:
                 status_text.empty()
-                st.error("⚠️ 오늘 구글의 하루 제공량(1,500장)을 모두 소진하여 내일 다시 이용해야 합니다.")
-            else:
+                st.error("⚠️ 오늘 구글의 하루 제공량을 모두 소진하여 더 이상 변환할 수 없습니다.")
+            elif not extracted_text:
                 status_text.empty()
-                st.error("❌ 변환된 지문이 없습니다. 파일 상태를 확인해 주세요.")
+                st.error("❌ 변환된 지문이 없습니다. (위의 상세 에러 로그를 확인해 주세요)")
 
 except KeyError:
     st.error("🔒 설정 오류: Streamlit Secrets에 API Key를 등록해 주세요.")
