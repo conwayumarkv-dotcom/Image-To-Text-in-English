@@ -100,17 +100,18 @@ try:
             style._element.rPr.get_or_add_rFonts().set(qn('w:hAnsi'), 'Arial')
             style.font.size = Pt(11)
             
-            # 버튼 클릭과 동시에 시각적 요소를 즉시 화면에 배치
+            # 버튼 클릭 즉시 요소 배치
             percent_display = st.empty()  
             progress_bar = st.progress(0)  
             status_text = st.empty()       
             
-            # 초기 상태 즉시 갱신
             percent_display.markdown('<p class="percent-text">⏳ 문서 생성률: 0%</p>', unsafe_allow_html=True)
             progress_bar.progress(0.0)
             status_text.text("🔄 인공지능 교사가 지문 판독을 시작합니다. 잠시만 기다려주세요...")
             
             total_files = len(uploaded_files)
+            
+            # [수정] 가장 토큰 효율이 좋고 정확한 정식 모델 노드로 매핑
             model_name = 'gemini-2.5-flash'
             
             success_count = 0     
@@ -118,34 +119,31 @@ try:
             api_error_occurred = False
             last_extracted_text = "" 
             
-            # 각 사진 한 장을 처리할 때 대략적으로 소요되는 가상 진행률 범위를 설정하여 등속 전진 유도
-            # 전체 0~100% 구간을 사진별로 분할하여 API가 작동하는 도중에도 바가 지속적으로 전진하도록 구현
             progress_per_file = 100.0 / total_files
             
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
                 extracted_text = "" 
                 
-                # 현재 지문 처리 시작 위치 계산
                 start_p = int(idx * progress_per_file)
-                mid_p = int((idx + 0.6) * progress_per_file)  # 인공지능 분석 예상 소요 시점
-                end_p = int((idx + 1) * progress_per_file)    # 문서 조립 완료 예상 시점
+                mid_p = int((idx + 0.6) * progress_per_file)
+                end_p = int((idx + 1) * progress_per_file)
                 
-                # 사진 로드 및 분석 요청 전 단계 전진
                 status_text.text(f"📝 [{idx+1}/{total_files}] '{file.name}' 파일을 읽어오는 중입니다...")
                 for p in range(start_p, min(mid_p, 99) + 1):
                     percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p / 100.0)
-                    time.sleep(0.02) # 균일한 속도감을 위한 타임 딜레이
+                    time.sleep(0.01)
                 
                 try:
+                    # [토큰 절약] 이미지 해상도를 최적화하여 인공지능 입력 토큰수 최소화
                     raw_img = Image.open(BytesIO(file_bytes))
                     if raw_img.mode != 'RGB':
                         raw_img = raw_img.convert('RGB')
-                    raw_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+                    raw_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
                     
                     compressed_buffer = BytesIO()
-                    raw_img.save(compressed_buffer, format="JPEG", quality=85)
+                    raw_img.save(compressed_buffer, format="JPEG", quality=80)
                     pil_image = Image.open(BytesIO(compressed_buffer.getvalue()))
                 except Exception:
                     try:
@@ -153,20 +151,20 @@ try:
                     except Exception:
                         continue
                 
+                # [토큰 절약] 지시문 명확화 및 경량화 -> 불필요하게 낭비되는 토큰 최소화
                 prompt = """
                 Extract English text from image.
-                Rules:
-                - Add '[HEADING]' before main titles.
-                - Add '[NAME]' before speaker names (e.g. [NAME] Name:).
-                - Remove all line numbers completely.
-                - Use continuous paragraphs; ignore image hard line breaks.
-                - No markdown. Output ONLY raw extracted text.
+                - Add '[HEADING]' before titles.
+                - Add '[NAME]' before speakers (e.g. [NAME] Tom:).
+                - Delete all line numbers.
+                - Keep paragraphs continuous, ignoring image line breaks.
+                - Plain text only, no markdown.
                 """
 
                 status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능이 영어 지문을 해석하고 정렬하고 있습니다...")
                 
-                # API 호출 도중에도 멈추지 않고 미세하게 전진하는 연출 (최대 다음 장 한도 전까지)
-                max_retries = 3
+                # 오류 반복으로 인한 토큰 유실 방지를 위해 대기 메커니즘 정밀화
+                max_retries = 2
                 for attempt in range(max_retries):
                     try:
                         response = client.models.generate_content(
@@ -184,17 +182,19 @@ try:
                             quota_blocked = True
                             break 
                             
-                        api_error_occurred = True
+                        if "404" in error_msg or "NOT_FOUND" in error_msg:
+                            api_error_occurred = True
+                            break
+                            
                         if attempt < max_retries - 1:
                             time.sleep(1.0)
                             continue
                         else:
                             break
 
-                if quota_blocked:
+                if quota_blocked or api_error_occurred:
                     break
 
-                # 지문 분석 결과 반영 및 워드 서식 빌더 단계 전진
                 if extracted_text:
                     try:
                         success_count += 1
@@ -242,15 +242,13 @@ try:
                     except Exception:
                         continue
                 
-                # 분석이 끝난 시점부터 해당 사진의 마무리 목표 지점까지 부드럽게 채우기
                 for p in range(mid_p + 1, min(end_p, 99) + 1):
                     percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p / 100.0)
                     time.sleep(0.01)
 
-            # --- 3단계: 최종 완료 화면 연출 ---
+            # 3. 결과 출력 및 완료 연출
             if success_count > 0:
-                # 마지막 남은 공백 게이지를 100%까지 깔끔하게 밀어 올려 마무리
                 current_p = int(progress_bar.progress) if hasattr(progress_bar, 'progress') else 90
                 for p in range(current_p, 101):
                     percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
@@ -281,7 +279,7 @@ try:
             elif api_error_occurred:
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("❌ 구글 인공지능 서버 연결이 원활하지 않습니다. 인터넷 연결을 확인하시거나 잠시 후 다시 시도해 주세요.")
+                st.error("❌ 시스템 모델 설정에 문제가 있거나 구글 서버 연결을 실패했습니다. 관리자 설정(Gemini Client 연결 방식)을 재점검해 주세요.")
             elif not last_extracted_text: 
                 percent_display.empty()
                 progress_bar.empty()
