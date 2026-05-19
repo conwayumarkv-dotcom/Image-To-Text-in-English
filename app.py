@@ -116,7 +116,7 @@ try:
             current_percent = 0
             success_count = 0     
             quota_blocked = False 
-            api_failed_completely = False # [추가] API가 완전히 실패했는지 추적하는 플래그
+            api_failed_completely = False 
             
             for idx, file in enumerate(uploaded_files):
                 image_bytes = file.read()
@@ -142,7 +142,6 @@ try:
 
                 virtual_target = max(current_percent, real_target_percent - 3)
                 
-                # [개선] 초기화 위치를 루프 시작점으로 보장하여 잔여 데이터 충돌 방지
                 extracted_text = ""
                 max_retries = 3  
                 
@@ -153,7 +152,6 @@ try:
                             contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.type), prompt]
                         )
                         
-                        # 응답 성공 시 텍스트 추출 및 가상 진행률 바 상승
                         extracted_text = response.text
                         
                         for p in range(current_percent, virtual_target + 1):
@@ -166,7 +164,6 @@ try:
                         
                     except (APIError, ClientError, ServerError) as e:
                         error_str = str(e).upper()
-                        # [개선] 구글 무료 티어 한도 초과 메시지 조건 판정 다양화 (429, LIMIT, EXHAUSTED)
                         if "LIMIT: 20" in error_str or "QUOTA" in error_str or "429" in error_str or "EXHAUSTED" in error_str:
                             quota_blocked = True
                             break
@@ -176,17 +173,18 @@ try:
                                 status_text.text(f"⏳ 서버 연결을 재시도하고 있습니다.. 잠시만 기다려주세요. ({remaining}초)")
                                 time.sleep(1)
                         else:
-                            # 3번 다 실패했을 경우 완전 실패로 간주
                             api_failed_completely = True
                             
+                # [버그 수정 핵심 1] 중간에 한도가 초과되었을 때의 처리 흐름 세분화
                 if quota_blocked:
-                    st.warning("⚠️ 하루 이용 한도를 모두 소진했습니다. 현재까지 성공한 지문들로만 워드 문서를 저장합니다.")
+                    # 이전에 성공적으로 변환해 둔 파일이 '최소 1개 이상' 있을 때만 이 경고창을 띄웁니다.
+                    if success_count > 0:
+                        st.warning("⚠️ 하루 이용 한도를 모두 소진했습니다. 현재까지 성공한 지문들로만 워드 문서를 저장합니다.")
                     break
                     
                 if api_failed_completely:
                     break
 
-                # 텍스트가 정상적으로 추출되었을 때만 Word 본문 서식 작업 진행
                 if extracted_text:
                     try:
                         success_count += 1
@@ -199,7 +197,6 @@ try:
                         current_percent = real_target_percent
                         status_text.text(f"✅ [{idx+1}/{total_files}] 지문 변환 및 서식 정리 완료!")
                         
-                        # 사진 출처 표기 서식
                         p_src = doc.add_paragraph()
                         r_src = p_src.add_run(f"▪ Source: {file.name}")
                         r_src.font.size = Pt(10)
@@ -213,7 +210,6 @@ try:
                             
                             p_tag = doc.add_paragraph()
                             
-                            # 스타일링 1: 소제목/제목 구조 처리
                             if clean_text.startswith("[HEADING]"):
                                 heading_content = clean_text.replace("[HEADING]", "").strip()
                                 run = p_tag.add_run(heading_content)
@@ -222,7 +218,6 @@ try:
                                 p_tag.paragraph_format.space_before = Pt(12) 
                                 p_tag.paragraph_format.space_after = Pt(6)   
                                 
-                            # 스타일링 2: 대화문 주체 구조 처리
                             elif clean_text.startswith("[NAME]"):
                                 name_content = clean_text.replace("[NAME]", "").strip()
                                 match = re.match(r"^([^:]+:)(.*)$", name_content)
@@ -235,7 +230,6 @@ try:
                                 else:
                                     p_tag.add_run(name_content)
                                     
-                            # 스타일링 3: 일반 본문 문장 구조 처리
                             else:
                                 plain_content = clean_text.replace("**", "")
                                 p_tag.add_run(plain_content)
@@ -253,14 +247,13 @@ try:
                             status_text.text(f"⏳ 다음 지문을 가져오는 중입니다.. ({sec_left}초)")
                             time.sleep(0.1)
 
-            # [개선된 조건문 아키텍처] 상황별 메시지 중복 노출 전면 차단
+            # [버그 수정 핵심 2] UI 최종 렌더링 조건문 완벽 분리
             if success_count > 0:
                 if not quota_blocked:
                     percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
                     progress_bar.progress(100)
                     status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 멋지게 변환되었습니다!")
                 
-                # 한도 초과로 중단되었더라도 성공한 게 있다면 다운로드 버튼만 깨끗하게 오픈
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
                 docx_buffer.seek(0)
@@ -275,11 +268,13 @@ try:
                 st.markdown('</div>', unsafe_allow_html=True)
                 
             else:
-                # 성공 개수가 0개인데 한도 초과인 경우
+                # 성공 개수가 0개이면서 한도가 끝난 경우에는 명확하게 분홍색 알림만 단 한 개 띄웁니다.
                 if quota_blocked:
+                    # 상단의 로딩 텍스트 잔상을 깨끗하게 지워줍니다.
+                    status_text.empty()
                     st.error("⚠️ 오늘 제공되는 구글의 무료 변환 한도가 모두 소진되어 지금은 변환을 시작할 수 없습니다. 내일 다시 이용해 주세요.")
-                # 일반적인 서버 다운/네트워크 오류인 경우
                 else:
+                    status_text.empty()
                     st.error("❌ 구글 서버 연결이 일시적으로 원활하지 않습니다. 잠시 후 다시 시도해 주세요.")
 
 except KeyError:
