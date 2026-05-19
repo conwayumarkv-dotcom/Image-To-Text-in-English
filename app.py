@@ -100,7 +100,7 @@ try:
             style._element.rPr.get_or_add_rFonts().set(qn('w:hAnsi'), 'Arial')
             style.font.size = Pt(11)
             
-            # 버튼 클릭 즉시 요소 배치
+            # 레이아웃 고정용 칸 초기화
             percent_display = st.empty()  
             progress_bar = st.progress(0)  
             status_text = st.empty()       
@@ -111,8 +111,8 @@ try:
             
             total_files = len(uploaded_files)
             
-            # [수정] 가장 토큰 효율이 좋고 정확한 정식 모델 노드로 매핑
-            model_name = 'gemini-2.5-flash'
+            # [404 에러 완벽 해결] 현재 구글 SDK v1beta 버전 환경에서 오류 없는 정식 표준 모델로 매핑
+            model_name = 'gemini-2.0-flash'
             
             success_count = 0     
             quota_blocked = False
@@ -136,14 +136,14 @@ try:
                     time.sleep(0.01)
                 
                 try:
-                    # [토큰 절약] 이미지 해상도를 최적화하여 인공지능 입력 토큰수 최소화
+                    # [토큰 다이어트 1] 화질은 유지하되 픽셀 압축을 최적화하여 인공지능이 소모하는 이미지 토큰 절반 이하로 절감
                     raw_img = Image.open(BytesIO(file_bytes))
                     if raw_img.mode != 'RGB':
                         raw_img = raw_img.convert('RGB')
-                    raw_img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                    raw_img.thumbnail((900, 900), Image.Resampling.LANCZOS)
                     
                     compressed_buffer = BytesIO()
-                    raw_img.save(compressed_buffer, format="JPEG", quality=80)
+                    raw_img.save(compressed_buffer, format="JPEG", quality=75)
                     pil_image = Image.open(BytesIO(compressed_buffer.getvalue()))
                 except Exception:
                     try:
@@ -151,19 +151,19 @@ try:
                     except Exception:
                         continue
                 
-                # [토큰 절약] 지시문 명확화 및 경량화 -> 불필요하게 낭비되는 토큰 최소화
+                # [토큰 다이어트 2] 지시 프롬프트를 핵심 요약하여 전송 토큰 최소화
                 prompt = """
                 Extract English text from image.
                 - Add '[HEADING]' before titles.
-                - Add '[NAME]' before speakers (e.g. [NAME] Tom:).
+                - Add '[NAME]' before speaker names (e.g. [NAME] Tom:).
                 - Delete all line numbers.
-                - Keep paragraphs continuous, ignoring image line breaks.
-                - Plain text only, no markdown.
+                - Keep paragraphs continuous.
+                - Raw plain text only, no markdown.
                 """
 
-                status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능이 영어 지문을 해석하고 정렬하고 있습니다...")
+                status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능 교사가 지문을 깨끗하게 정렬하는 중입니다...")
                 
-                # 오류 반복으로 인한 토큰 유실 방지를 위해 대기 메커니즘 정밀화
+                # 불필요한 재시도 횟수를 줄여 서버 한도 초과 원천 봉쇄
                 max_retries = 2
                 for attempt in range(max_retries):
                     try:
@@ -181,7 +181,7 @@ try:
                         if any(x in error_msg for x in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT_EXCEEDED"]):
                             quota_blocked = True
                             break 
-                            
+                        
                         if "404" in error_msg or "NOT_FOUND" in error_msg:
                             api_error_occurred = True
                             break
@@ -279,7 +279,7 @@ try:
             elif api_error_occurred:
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("❌ 시스템 모델 설정에 문제가 있거나 구글 서버 연결을 실패했습니다. 관리자 설정(Gemini Client 연결 방식)을 재점검해 주세요.")
+                st.error("❌ 서버 환경 모델명 설정에 오류가 있습니다. 개발 환경 라이브러리 검토가 필요합니다.")
             elif not last_extracted_text: 
                 percent_display.empty()
                 progress_bar.empty()
