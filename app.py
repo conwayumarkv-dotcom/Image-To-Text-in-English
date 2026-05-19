@@ -1,6 +1,7 @@
 import streamlit as st
 from docx import Document
 from docx.shared import Pt, RGBColor
+from docx.oxml.ns import qn 
 from io import BytesIO
 import time
 import re
@@ -15,7 +16,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# 세련되고 직관적인 커스텀 CSS (크림/그린 테마 정자체 세팅)
+# 세련되고 직관적인 커스텀 CSS
 st.markdown("""
     <style>
     .stApp { background-color: #FDFBF6; }
@@ -81,7 +82,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# UI 상단 타이틀 및 설명 구조 정제
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
 st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
@@ -104,6 +104,8 @@ try:
             doc = Document()
             style = doc.styles['Normal']
             style.font.name = 'Arial'
+            style._element.rPr.get_or_add_rFonts().set(qn('w:ascii'), 'Arial')
+            style._element.rPr.get_or_add_rFonts().set(qn('w:hAnsi'), 'Arial')
             style.font.size = Pt(11)
             
             percent_display = st.empty()  
@@ -112,20 +114,22 @@ try:
             
             total_files = len(uploaded_files)
             
-            # 하루 1,500장까지 한도가 넉넉한 1.5-flash 모델 적용
-            model_name = 'gemini-1.5-flash'
+            # ⚡ 토큰 효율성 및 속도가 최적화된 최신 플래그십 플래시 모델
+            model_name = 'gemini-2.5-flash'
             
             success_count = 0     
             quota_blocked = False
+            last_extracted_text = "" 
             
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
+                extracted_text = "" 
                 
-                # 고용량 사진 데이터 전처리 다이어트 (토큰 한도 방어)
                 try:
                     raw_img = Image.open(BytesIO(file_bytes))
                     if raw_img.mode != 'RGB':
                         raw_img = raw_img.convert('RGB')
+                    # 📉 이미지 해상도를 적절히 제한하여 입력 이미지 토큰 절약
                     raw_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
                     
                     compressed_buffer = BytesIO()
@@ -138,14 +142,15 @@ try:
                         st.error(f"❌ '{file.name}' 이미지를 로드하는 과정에서 에러가 발생했습니다.")
                         continue
                 
+                # ✂️ [토큰 다이어트] 불필요한 수식어를 빼고 구조를 단순화하여 입력 토큰을 절약한 프롬프트
                 prompt = """
-                Extract the English text from this image perfectly.
+                Extract English text from image.
                 Rules:
-                - Add '[HEADING]' tag at the front of main titles.
-                - Add '[NAME]' tag before speaker names and a colon after (e.g., [NAME] Mike: ).
-                - Remove all line numbers (like 5, 10, 15) entirely.
-                - Do not follow the image's hard line breaks. Output as a continuous paragraph unless the context completely changes.
-                - No markdown (like **). Output ONLY the extracted text and nothing else.
+                - Add '[HEADING]' before main titles.
+                - Add '[NAME]' before speaker names (e.g. [NAME] Name:).
+                - Remove all line numbers completely.
+                - Use continuous paragraphs; ignore image hard line breaks.
+                - No markdown. Output ONLY raw extracted text.
                 """
                 
                 status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 분석 중입니다...")
@@ -158,10 +163,8 @@ try:
                     progress_bar.progress(p)
                     time.sleep(0.02)
 
-                extracted_text = ""
                 max_retries = 3
                 
-                # 🛠️ [핵심 개선] 자동 재시도 루프 및 실제 에러 출력기 장착
                 for attempt in range(max_retries):
                     try:
                         response = client.models.generate_content(
@@ -170,23 +173,21 @@ try:
                             config=types.GenerateContentConfig(temperature=0.0)
                         )
                         extracted_text = response.text
-                        break # 성공 시 반복문 탈출
+                        last_extracted_text = extracted_text
+                        break 
                         
                     except Exception as api_err:
                         error_msg = str(api_err).upper()
                         
-                        # 429 한도 초과 에러는 재시도 없이 즉각 차단
                         if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "QUOTA" in error_msg:
                             quota_blocked = True
                             break 
                             
-                        # 일시적인 네트워크 오류나 503 에러면 최대 3번까지 2초 쉬고 자동 재시도
                         if attempt < max_retries - 1:
                             status_text.text(f"⏳ 서버 응답 지연. 다시 연결 중입니다... ({attempt+1}/{max_retries})")
                             time.sleep(2)
                             continue
                         else:
-                            # 3번 모두 실패하면 진짜 에러의 민낯을 출력 (더 이상 '일시적 오류'로 뭉뚱그리지 않음)
                             st.error(f"❌ '{file.name}' 변환 실패 상세 원인: {str(api_err)}")
                             break
 
@@ -240,9 +241,10 @@ try:
                             else:
                                 plain_content = clean_text.replace("**", "")
                                 p_tag.add_run(plain_content)
-                                        
-                        doc.add_page_break()
                         
+                        if idx < total_files - 1:
+                            doc.add_page_break()
+                                        
                     except Exception as word_err:
                         st.warning(f"⚠️ '{file.name}' 문서 디자인 조립 중 경미한 지연이 생겨 안전하게 다음으로 패스합니다.")
                         continue
@@ -274,7 +276,7 @@ try:
             elif quota_blocked and success_count == 0:
                 status_text.empty()
                 st.error("⚠️ 오늘 구글의 하루 제공량을 모두 소진하여 더 이상 변환할 수 없습니다.")
-            elif not extracted_text:
+            elif not last_extracted_text: 
                 status_text.empty()
                 st.error("❌ 변환된 지문이 없습니다. (위의 상세 에러 로그를 확인해 주세요)")
 
