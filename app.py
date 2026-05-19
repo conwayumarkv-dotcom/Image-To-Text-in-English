@@ -4,7 +4,7 @@ from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
 import re
-import threading  # 🛠️ 비동기 진행률 처리를 위한 라이브러리
+import threading
 from PIL import Image
 from google import genai
 from google.genai import types
@@ -23,9 +23,12 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# API 워커 함수 (백그라운드에서 동작)
+st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
+
+# 🛠️ 백그라운드 API 워커
 def gemini_api_worker(client, model, pil_image, prompt, result):
     try:
+        # 모델 호출 (안정적인 gemini-2.0-flash 사용)
         response = client.models.generate_content(model=model, contents=[pil_image, prompt])
         result["text"] = response.text
         result["status"] = "success"
@@ -33,86 +36,61 @@ def gemini_api_worker(client, model, pil_image, prompt, result):
         result["status"] = "error"
         result["error"] = str(e)
 
-st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
-
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key)
+    
     uploaded_files = st.file_uploader("사진을 업로드하세요", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
     if uploaded_files and st.button("Word 파일로 변환하기 ✨"):
         doc = Document()
+        style = doc.styles['Normal']
+        style.font.name = 'Arial'
+        
         progress_bar = st.progress(0)
-        percent_text = st.empty()
         status_text = st.empty()
         
-        total_files = len(uploaded_files)
+        # 🛠️ 모델명 변경 (1.5가 안 잡힐 경우 2.0으로 시도)
+        model_name = 'gemini-2.0-flash'
         
         for idx, file in enumerate(uploaded_files):
-            # 1. 이미지 전처리
+            # 이미지 전처리
             raw_img = Image.open(file)
             if raw_img.mode != 'RGB': raw_img = raw_img.convert('RGB')
             raw_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
-            img_buffer = BytesIO()
-            raw_img.save(img_buffer, format="JPEG", quality=85)
-            pil_image = Image.open(BytesIO(img_buffer.getvalue()))
             
-            prompt = "Extract text. [HEADING] for titles, [NAME] Name: for dialogue. No line numbers, continuous paragraphs. Pure text only."
-            
-            # 2. 비동기 작업 실행
+            # API 호출용 스레드
             result = {"status": "pending", "text": None, "error": None}
-            api_thread = threading.Thread(target=gemini_api_worker, args=(client, 'gemini-1.5-flash', pil_image, prompt, result))
-            api_thread.start()
+            thread = threading.Thread(target=gemini_api_worker, args=(client, model_name, raw_img, "Extract text...", result))
+            thread.start()
             
-            # 3. 부드러운 애니메이션 루프 (UI Thread)
-            start_progress = int((idx / total_files) * 100)
-            end_progress = int(((idx + 1) / total_files) * 100)
+            # 애니메이션 루프
+            start_p = int((idx / len(uploaded_files)) * 100)
+            end_p = int(((idx + 1) / len(uploaded_files)) * 100)
             
-            current_p = start_progress
-            while api_thread.is_alive():
-                if current_p < end_progress - 2: # 98%까지만 가상으로 전진
-                    current_p += 1
-                    percent_text.markdown(f'<p class="percent-text">⏳ 변환 진행률: {current_p}%</p>', unsafe_allow_html=True)
-                    progress_bar.progress(current_p)
-                time.sleep(0.1) # 애니메이션 속도 조절
-            
-            api_thread.join()
+            p = start_p
+            while thread.is_alive():
+                if p < end_p - 2:
+                    p += 1
+                    progress_bar.progress(p)
+                time.sleep(0.05)
+            thread.join()
             
             if result["status"] == "success":
-                # 나머지 퍼센트 채우기
-                progress_bar.progress(end_progress)
-                percent_text.markdown(f'<p class="percent-text">✅ 완료: {end_progress}%</p>', unsafe_allow_html=True)
-                
-                # 워드 작성
-                doc.add_paragraph(f"Source: {file.name}").runs[0].font.color.rgb = RGBColor(128, 128, 128)
+                progress_bar.progress(end_p)
+                # 워드 조립
                 for line in result["text"].split('\n'):
-                    line = line.strip()
-                    if not line: continue
-                    p = doc.add_paragraph()
-                    if line.startswith("[HEADING]"):
-                        run = p.add_run(line.replace("[HEADING]", "").strip())
-                        run.bold = True
-                        run.font.size = Pt(13)
-                    elif line.startswith("[NAME]"):
-                        content = line.replace("[NAME]", "").strip()
-                        match = re.match(r"^([^:]+:)(.*)$", content)
-                        if match:
-                            p.add_run(match.group(1)).bold = True
-                            p.add_run(match.group(2))
-                        else:
-                            p.add_run(content)
-                    else:
-                        p.add_run(line.replace("**", ""))
+                    if not line.strip(): continue
+                    para = doc.add_paragraph()
+                    para.add_run(line.replace("**", ""))
                 doc.add_page_break()
             else:
-                st.error(f"❌ 분석 실패: {file.name} - {result['error']}")
+                st.error(f"❌ '{file.name}' 분석 실패: {result['error']}")
 
-        # 결과 저장
-        docx_buffer = BytesIO()
-        doc.save(docx_buffer)
-        docx_buffer.seek(0)
-        st.download_button("📥 워드 파일 다운로드", data=docx_buffer, file_name="Converted_Texts.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        # 다운로드
+        buffer = BytesIO()
+        doc.save(buffer)
+        st.download_button("📥 워드 다운로드", data=buffer.getvalue(), file_name="output.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-except KeyError:
-    st.error("🔒 설정 오류: API Key가 등록되지 않았습니다.")
+except Exception as e:
+    st.error(f"시스템 에러: {str(e)}")
