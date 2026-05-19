@@ -5,7 +5,7 @@ from io import BytesIO
 import time
 import re
 import json
-import threading
+import threading  # 🛠️ Streamlit 리런 버그 및 한도 초과 차단을 위한 스레드 도입
 from PIL import Image
 from google import genai
 from google.genai import types
@@ -84,11 +84,12 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# UI 상단 타이틀 및 설명 구조 정제
 st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
 st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
-# 🛠️ 비동기 API 처리를 담당하는 백그라운드 스레드 워커 함수
+# 🛠️ 단어장 프로그램의 고효율 비동기 API 제어 아키텍처 이식
 def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
     max_retries = 3
     for attempt in range(max_retries):
@@ -97,11 +98,11 @@ def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
                 model=model_name,
                 contents=[pil_image, prompt],
                 config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
+                    response_mime_type="application/json"  # 🟢 JSON 응답 선언으로 API 부하 최소화
                 )
             )
             
-            # 구글 AI가 보낸 마크다운 코드 블록(```json ... ```)을 깨끗하게 슬라이싱 처리
+            # 마크다운 코드 블록 장식 기호 정제 처리
             clean_text = response.text.strip()
             if clean_text.startswith("```"):
                 clean_text = re.sub(r"^
