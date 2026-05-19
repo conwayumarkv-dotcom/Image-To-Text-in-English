@@ -1,354 +1,295 @@
 import streamlit as st
+from docx import Document
+from docx.shared import Pt, RGBColor
+from io import BytesIO
+import time
+import re
 from google import genai
 from google.genai import types
-import docx
-from docx.shared import Pt, Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
-import json
-import io
-import time
-import threading
+from google.genai.errors import APIError, ClientError, ServerError
 
-# ==========================================
-# 1. 워드 파일 디자인 & 생성 헬퍼 함수
-# ==========================================
-def set_cell_borders(cell, color="D9D9D9", sz="4", val="single"):
-    tcPr = cell._tc.get_or_add_tcPr()
-    tcBorders = OxmlElement('w:tcBorders')
-    for border_name in ['top', 'left', 'bottom', 'right']:
-        border = OxmlElement(f'w:{border_name}')
-        border.set(qn('w:val'), val)
-        border.set(qn('w:sz'), sz)
-        border.set(qn('w:space'), '0')
-        border.set(qn('w:color'), color)
-    tcBorders.append(border)
-    tcPr.append(tcBorders)
+# 1. 페이지 기본 설정 및 디자인
+st.set_page_config(
+    page_title="Image To Text in English",
+    page_icon="📝",
+    layout="centered"
+)
 
-def set_cell_shading(cell, color):
-    tcPr = cell._tc.get_or_add_tcPr()
-    shd = OxmlElement('w:shd')
-    shd.set(qn('w:val'), 'clear')
-    shd.set(qn('w:color'), 'auto')
-    shd.set(qn('w:fill'), color)
-    tcPr.append(shd)
-
-def create_word_document(all_word_data):
-    doc = docx.Document()
-    
-    for section in doc.sections:
-        section.top_margin = Inches(1)
-        section.bottom_margin = Inches(1)
-        section.left_margin = Inches(1)
-        section.right_margin = Inches(1)
-        
-    style = doc.styles['Normal']
-    style.font.name = 'Malgun Gothic'
-    style.font.size = Pt(10.5)
-    
-    title_p = doc.add_paragraph()
-    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_p.add_run("통합 본문 단어장")
-    title_run.font.bold = True
-    title_run.font.size = Pt(18)
-    title_p.paragraph_format.space_after = Pt(24)
-    
-    table = doc.add_table(rows=1, cols=3)
-    table.autofit = False
-    col_widths = [Inches(1.5), Inches(2.0), Inches(4.0)]
-    
-    hdr_cells = table.rows[0].cells
-    headers = ["본문 단어", "우리말 뜻", "영영 풀이"]
-    for i, text in enumerate(headers):
-        hdr_cells[i].text = text
-        hdr_cells[i].width = col_widths[i]
-        set_cell_shading(hdr_cells[i], "4F81BD")
-        set_cell_borders(hdr_cells[i], color="A6A6A6")
-        p = hdr_cells[i].paragraphs[0]
-        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        for run in p.runs:
-            run.font.bold = True
-            run.font.color.rgb = docx.shared.RGBColor(255, 255, 255)
-            
-    for row_idx, item in enumerate(all_word_data):
-        row_cells = table.add_row().cells
-        row_data = [item.get("word", ""), item.get("meaning", ""), item.get("definition", "")]
-        
-        for i, text in enumerate(row_data):
-            # [TypeError 예외 차단 완료] text 데이터가 없거나 형식이 숫자인 경우를 대비해 안전하게 문자열 변환 처리
-            row_cells[i].text = str(text) if text is not None else ""
-            row_cells[i].width = col_widths[i]
-            if row_idx % 2 == 1:
-                set_cell_shading(row_cells[i], "F2F5F8")
-            set_cell_borders(row_cells[i], color="D9D9D9")
-            
-            p = row_cells[i].paragraphs[0]
-            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            p.paragraph_format.space_before = Pt(5)
-            p.paragraph_format.space_after = Pt(5)
-            for run in p.runs:
-                run.font.size = Pt(10)
-                
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
-
-# ==========================================
-# 2. 백그라운드 AI 호출 및 에러 자동 재시도 워커 함수
-# ==========================================
-def gemini_api_worker(client, image_bytes, mime_type, prompt, result_container):
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                    prompt
-                ],
-                config=types.GenerateContentConfig(response_mime_type="application/json")
-            )
-            result_container["data"] = json.loads(response.text)
-            result_container["status"] = "success"
-            return
-        except Exception as e:
-            error_msg = str(e)
-            if ("503" in error_msg or "unavailable" in error_msg.lower() or "demand" in error_msg.lower()) and attempt < max_retries - 1:
-                time.sleep(2.0 * (attempt + 1))
-                continue
-            
-            result_container["status"] = "error"
-            result_container["error_msg"] = error_msg
-            return
-
-# ==========================================
-# 3. 이미지 비동기 분석 및 균일 선형 정밀 제어 로직
-# ==========================================
-def process_images_safely(client, uploaded_files, api_key, progress_bar, status_text):
-    all_data = []
-    total_files = len(uploaded_files)
-    
-    prompt = """
-    이 이미지에서 영어 단어, 우리말 뜻, 영영 풀이를 추출해서 정확한 JSON 배열 형식으로 출력해줘.
-    필기구로 수정한 흔적이나 추가로 적은 필기는 무시하고, 원래 인쇄되어 있던 텍스트만 추출해줘.
-    결과는 오직 아래 구조를 가진 JSON 데이터만 반환해야 해:
-    [
-      {"word": "단어", "meaning": "품사 및 뜻", "definition": "영영 풀이 내용"}
-    ]
-    """
-    
-    ui_progress = 0.0
-    
-    for idx, file in enumerate(uploaded_files):
-        file.seek(0)
-        image_bytes = file.read()
-        
-        worker_result = {"status": "pending", "data": None, "error_msg": None}
-        
-        api_thread = threading.Thread(
-            target=gemini_api_worker, 
-            args=(client, image_bytes, file.type, prompt, worker_result)
-        )
-        api_thread.start()
-        
-        start_progress = idx / total_files
-        target_max_progress = (idx + 1) / total_files
-        file_share = 1.0 / total_files
-        
-        # [정체 현상 해결 핵심 알고리즘]
-        # AI 응답 대기 시간 동안 끊김을 방지하기 위해 파일당 정해진 진행 속도를 아주 정밀하게 쪼개어 배정합니다.
-        # 루프당 고정 증가폭을 균일화하여 50% 구간이나 대기 마감 지점(95% 이상)에서의 멈춤을 완벽 제거합니다.
-        step_increment = file_share * 0.006 
-        
-        while api_thread.is_alive():
-            # 다음 파일 도달 목표치의 97% 지점까지는 흔들림 없는 일정한 대각선 선형 속도로 부드럽게 상승시킵니다.
-            if ui_progress < (start_progress + (file_share * 0.97)):
-                ui_progress += step_increment
-            else:
-                # 혹시 AI 분석 속도가 가상 타임라인보다 살짝 늦어질 경우에만 초미세 속도로 계속 전진하도록 유도합니다.
-                ui_progress += file_share * 0.0005
-                
-            if ui_progress > 0.99: ui_progress = 0.99
-            
-            progress_bar.progress(ui_progress)
-            status_text.markdown(f"🔍 **[ {int(ui_progress * 100)}% / 100% ]** ({idx+1}/{total_files}장째) AI가 사진 속 영어 단어를 열심히 읽어내고 있어요..")
-            time.sleep(0.05)
-            
-        if worker_result["status"] == "success" and worker_result["data"]:
-            all_data.extend(worker_result["data"])
-            
-            # AI 데이터 처리가 응답된 직후, 가쁜 정체 없이 다음 파일 파트로 바톤을 정밀하게 연결해 넘겨줍니다.
-            while ui_progress < target_max_progress:
-                ui_progress += 0.02
-                if ui_progress > target_max_progress: ui_progress = target_max_progress
-                progress_bar.progress(ui_progress)
-                status_text.markdown(f"✨ **[ {int(ui_progress * 100)}% / 100% ]** ({idx+1}/{total_files}장째) 선생님 단어장에 맞게 예쁘게 다듬는 중입니다!")
-                time.sleep(0.01)
-                
-        elif worker_result["status"] == "error":
-            error_msg = worker_result["error_msg"]
-            if "quota" in error_msg.lower() or "limit" in error_msg.lower():
-                if idx > 0:
-                    st.warning("⚠️ 오늘 준비된 무료 변환량(20장)을 모두 사용하셨습니다. 아쉽지만 현재까지 성공한 단어들로만 Word 문서를 만듭니다.")
-                    break
-                else:
-                    st.error("❌ 구글이 제공하는 무료 하루 사용량(20장)을 초과하여 지금은 변환할 수 없습니다. 내일 다시 이용해 주세요.")
-                    return None
-            elif "503" in error_msg or "unavailable" in error_msg.lower():
-                st.error("❌ 순간적으로 구글 AI 서버에 사용자가 몰려 응답이 지연되었습니다. 잠시 후 'Word 파일로 변환하기' 버튼을 한 번만 더 눌러주세요.")
-                return None
-            else:
-                st.error(f"❌ 단어 변환 중 예상치 못한 오류가 생겼습니다: {error_msg}")
-                return None
-                
-    if all_data:
-        progress_bar.progress(1.0)
-        status_text.success("🌿 **[ 100% / 100% ]** 수업용 단어장이 완성되었습니다! 아래 다운로드 버튼을 눌러보세요!")
-    return all_data
-
-# ==========================================
-# 4. Streamlit 메인 UI 대시보드
-# ==========================================
-st.set_page_config(page_title="Voca-converter", layout="centered", page_icon="📝")
-
+# 세련되고 직관적인 커스텀 CSS (크림/그린 테마 정자체 세팅)
 st.markdown("""
     <style>
-    html, body, [data-testid="stAppViewContainer"] {
-        background-color: #FBF9F4 !important;
+    .stApp { background-color: #FDFBF6; }
+    .main-title {
+        font-size: 42px !important; 
+        font-weight: 800;
+        color: #5C715E;
+        text-align: center;
+        margin-bottom: 8px;
+        letter-spacing: -1.5px;
+        white-space: nowrap;
     }
-    
-    [data-testid="stMainBlockContainer"] {
-        background-color: transparent !important;
-        max-width: 720px !important;
-        margin: 0 auto !important;
-        padding-top: 50px !important;
+    .sub-title {
+        font-size: 18px;
+        color: #7A7A7A;
+        text-align: center;
+        margin-bottom: 10px;
+        font-weight: 400;
+        letter-spacing: -0.5px;
     }
-    
-    [data-testid="stVerticalBlockBorderContainer"] {
-        border: none !important;
-        background: transparent !important;
-        box-shadow: none !important;
-        padding: 0 !important;
-    }
-
-    .brand-title {
-        font-size: 52px !important;
-        font-weight: 700 !important;
-        color: #556B2F !important;
-        text-align: center !important;
-        margin-bottom: 5px !important;
-        letter-spacing: -1px !important;
-    }
-    
-    .brand-caption {
-        font-size: 15px !important;
-        color: #8C9A86 !important;
-        text-align: center !important;
-        margin-bottom: 5px !important;
-        font-weight: 500 !important;
-    }
-    
-    .brand-author {
-        font-size: 11px !important;
-        color: #A0ABA2 !important;
-        text-align: right !important;
-        margin-bottom: 45px !important;
-        font-weight: 500 !important;
+    .author-footer {
+        font-size: 14px;
+        color: #B2B2B2; 
+        text-align: right;
+        margin-bottom: 45px;
         padding-right: 5px;
-        letter-spacing: 0.5px;
     }
-
-    [data-testid="stFileUploader"] {
-        border: none !important;
-        background-color: #EEF1F6 !important;
-        border-radius: 14px !important;
-        padding: 20px 25px !important;
+    .stFileUploader {
+        border-radius: 15px !important;
+        background-color: white;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        padding: 10px;
     }
-    
     div.stButton > button:first-child {
-        background-color: #85A392 !important; 
-        color: white !important;
-        border: none !important;
-        font-size: 16px !important;
-        font-weight: 500 !important;
-        border-radius: 10px !important;
-        padding: 12px 24px !important;
-        box-shadow: none !important;
-        width: auto !important;
+        background-color: #94A69A;
+        color: white;
+        border-radius: 10px;
+        border: none;
+        padding: 12px 40px;
+        font-weight: 600;
+        font-size: 16px;
+        width: 100%;
+        transition: all 0.3s ease;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
     }
-    div.stButton > button:first-child:hover {
-        background-color: #6C8B7A !important;
+    div.stButton > button:first-child:hover { background-color: #7E8F83; }
+    .status-box {
+        padding: 25px;
+        border-radius: 20px;
+        background-color: white;
+        margin-top: 30px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+        text-align: center;
     }
-    
-    [data-testid="stDownloadButton"]>button {
-        background-color: #78909C !important;
-        color: white !important;
-        border-radius: 10px !important;
-        border: none !important;
-        padding: 12px 24px !important;
-    }
-    [data-testid="stDownloadButton"]>button:hover {
-        background-color: #607D8B !important;
-    }
-    
-    div[data-testid="stNotification"] {
-        background-color: #E8F1FC !important;
-        border: none !important;
-        border-radius: 12px !important;
-    }
-    div[data-testid="stNotification"] p {
-        color: #1E60B4 !important;
-        font-weight: 500 !important;
-    }
-    
-    .stProgress > div > div > div > div {
-        background-color: #85A392 !important;
+    .percent-text {
+        font-size: 20px;
+        font-weight: 700;
+        color: #5C715E;
+        margin-bottom: 8px;
+        text-align: left;
     }
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<div class='brand-title'>Voca-converter</div>", unsafe_allow_html=True)
-st.markdown("<div class='brand-caption'>사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</div>", unsafe_allow_html=True)
-st.markdown("<div class='brand-author'>© TOP English Academy. All rights reserved.</div>", unsafe_allow_html=True)
+# UI 상단 타이틀 및 설명 구조 정제
+st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
+st.markdown('<div class="author-footer">(Made by Manju)</div>', unsafe_allow_html=True)
 
-if "GEMINI_API_KEY" in st.secrets:
+try:
     api_key = st.secrets["GEMINI_API_KEY"]
-else:
-    st.error("❌ Streamlit Cloud 설정의 Secrets에 GEMINI_API_KEY가 등록되지 않았습니다.")
-    st.stop()
-
-uploaded_files = st.file_uploader(
-    "변환할 영어 지문 사진을 업로드하세요 (복수 선택 가능)", 
-    type=["jpg", "jpeg", "png"], 
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    st.write("")
-    st.markdown(f"📂 **{len(uploaded_files)}개의 파일이 선택되었습니다.**")
+    client = genai.Client(api_key=api_key)
     
-    if st.button("Word 파일로 변환하기 ✨", type="primary"):
-        client = genai.Client(api_key=api_key)
+    uploaded_files = st.file_uploader(
+        "변환할 영어 지문 사진을 업로드하세요 (복수 선택 가능)", 
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        st.write(f"📂 **{len(uploaded_files)}개**의 파일이 선택되었습니다.")
         
-        status_text = st.empty()
-        progress_bar = st.progress(0)
-        
-        all_word_data = process_images_safely(client, uploaded_files, api_key, progress_bar, status_text)
-        
-        if all_word_data:
-            st.toast("단어 데이터 정제가 완료되었습니다!")
-            st.write("---")
-            st.write("### 🔍 데이터 통합 미리보기")
-            st.dataframe(all_word_data, use_container_width=True)
+        if st.button("Word 파일로 변환하기 ✨"):
             
-            word_file_buffer = create_word_document(all_word_data)
+            doc = Document()
+            style = doc.styles['Normal']
+            style.font.name = 'Arial'
+            style.font.size = Pt(11)
             
-            st.download_button(
-                label="📥 수업용 영어 단어장 워드파일(.docx) 다운로드 받기",
-                data=word_file_buffer,
-                file_name="🔮_통합_영어단어장.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True
-            )
+            percent_display = st.empty()  
+            progress_bar = st.progress(0)  
+            status_text = st.empty()       
+            
+            total_files = len(uploaded_files)
+            model_name = 'gemini-2.5-flash'
+            
+            current_percent = 0
+            success_count = 0     
+            quota_blocked = False 
+            
+            for idx, file in enumerate(uploaded_files):
+                image_bytes = file.read()
+                
+                prompt = """
+                이 사진 속의 영어 지문 텍스트를 상식적이고 가독성 높은 문맥에 맞춰 추출해줘.
+                - 사진의 메인 제목이나 큰 단원 소제목이 있다면 텍스트 제일 앞에 '[HEADING]' 이라는 태그를 붙여줘. (예: [HEADING] Into a New World of Storytelling)
+                - 대화 내용 구조인 경우에만, 대화 주체 이름 뒤에 콜론(:)을 붙이고 이름 앞에 '[NAME]' 태그를 붙여줘. (예: [NAME] Mike: Hey, guys!)
+                
+                [⚠️ 중요 규칙: 가독성 및 줄바꿈 지시]
+                - 영어 원문 텍스트 중간이나 우측 가장자리에 적혀 있는 '5', '10', '15'와 같은 행 번호(Line Numbers) 표시는 지문 본문 단어와 꼬이지 않도록 완벽하게 무시하고 걷어내줘.
+                - 원본 사진의 줄바꿈을 억지로 따라 하지 마. 하나의 긴 단락(Paragraph)은 인위적으로 끊지 말고 쭉 이어서 하나의 유기적인 문단으로 합쳐서 완성해줘. 
+                - 오직 문맥상 새로운 이야기나 단락이 시작될 때만 자연스럽게 줄바꿈을 적용해줘.
+                - 본문 단어에 임의로 마크다운 별표(**)나 진하게 설정을 넣지 마. 오직 순수한 텍스트만 출력해줘.
+                - 결과물은 오직 추출된 텍스트만 보여주고, 다른 부연 설명은 하지 마.
+                """
+                
+                status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 지문을 AI 서버에서 분석하는 중...")
+                
+                # ---------------------------------------------------------
+                # 🛠️ [핵심 개선] 부드러운 진행률 상승을 위한 가상 애니메이션 루프 적용
+                # ---------------------------------------------------------
+                # 이번 파일 작업 완료 시 도달해야 할 실제 최종 목표 %
+                real_target_percent = int(((idx + 1) / total_files) * 100)
+                if idx == total_files - 1:
+                    real_target_percent = 100
+
+                # AI 호출 직전, 다음 목표치 직전(-2%)까지 부드럽게 먼저 채우는 가상 루프
+                # 예: 0% -> 98%까지 약 4~5초간 일정하게 올라가며 사용자의 지루함을 방지합니다.
+                virtual_target = max(current_percent, real_target_percent - 2)
+                
+                extracted_text = ""
+                max_retries = 3  
+                
+                for attempt in range(max_retries):
+                    try:
+                        # 1단계: 가상으로 70% 정도까지 아주 빠르게 먼저 도달하게 유도 (체감 속도 업)
+                        mid_target = current_percent + int((virtual_target - current_percent) * 0.7)
+                        for p in range(current_percent, mid_target + 1):
+                            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
+                            progress_bar.progress(p)
+                            time.sleep(0.01)
+                        
+                        current_percent = mid_target
+                        
+                        # 2단계: 나머지 98% 지점까지는 AI 연산 속도(약 3~4초)에 맞춰 초당 약 10~15%씩 서서히 증가
+                        # AI 서버 응답이 이 루프 중간이나 끝난 직후에 떨어지도록 완충 작용을 합니다.
+                        response = None
+                        
+                        # 가상으로 조금씩 전진하는 비동기식 연출 루프 효과
+                        for p in range(current_percent, virtual_target + 1):
+                            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
+                            progress_bar.progress(p)
+                            
+                            # 루프 극초반에 딱 한 번 API 실제 요청을 보냄 (Non-blocking 느낌으로 연출)
+                            if response is None:
+                                response = client.models.generate_content(
+                                    model=model_name,
+                                    contents=[types.Part.from_bytes(data=image_bytes, mime_type=file.type), prompt]
+                                )
+                            
+                            # API 응답을 이미 받았으므로 루프 가속을 위해 아주 짧은 딜레이만 할당
+                            time.sleep(0.04) 
+                        
+                        extracted_text = response.text
+                        current_percent = virtual_target
+                        break  
+                        
+                    except (APIError, ClientError, ServerError) as e:
+                        error_str = str(e).upper()
+                        if "LIMIT: 20" in error_str:
+                            quota_blocked = True
+                            break
+                            
+                        if attempt < max_retries - 1:
+                            for remaining in range(8, 0, -1):
+                                status_text.text(f"⏳ 처리하는데 시간이 걸리니 조금만 기다려주세요.. ({remaining}초)")
+                                time.sleep(1)
+                        else:
+                            st.error(f"❌ '{file.name}' 구글 서버 일시 지연으로 실패")
+                            
+                if quota_blocked:
+                    st.warning("⚠️ 오늘 사용 가능한 구글 무료 한도(하루 20장)를 모두 소진했습니다. 현재까지 변환 성공한 지문들로만 워드 문서를 저장합니다.")
+                    break
+
+                if extracted_text:
+                    try:
+                        success_count += 1
+                        
+                        # 3단계: AI 데이터 처리가 끝나면 목표했던 진짜 %까지 완벽하게 도달시킴
+                        for p in range(current_percent, real_target_percent + 1):
+                            percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
+                            progress_bar.progress(p)
+                            time.sleep(0.01)
+                        
+                        current_percent = real_target_percent
+                        status_text.text(f"✅ [{idx+1}/{total_files}] 정제 완료!")
+                        
+                        # 사진 출처 표기 서식
+                        p_src = doc.add_paragraph()
+                        r_src = p_src.add_run(f"▪ Source: {file.name}")
+                        r_src.font.size = Pt(10)
+                        r_src.font.color.rgb = RGBColor(128, 128, 128)  
+                        
+                        paragraphs = extracted_text.split('\n')
+                        for para_text in paragraphs:
+                            clean_text = para_text.strip()
+                            if not clean_text:
+                                continue
+                            
+                            p_tag = doc.add_paragraph()
+                            
+                            # 스타일링 1: 소제목/제목 구조 처리
+                            if clean_text.startswith("[HEADING]"):
+                                heading_content = clean_text.replace("[HEADING]", "").strip()
+                                run = p_tag.add_run(heading_content)
+                                run.bold = True
+                                run.font.size = Pt(13) 
+                                p_tag.paragraph_format.space_before = Pt(12) 
+                                p_tag.paragraph_format.space_after = Pt(6)   
+                                
+                            # 스타일링 2: 대화문 주체 구조 처리
+                            elif clean_text.startswith("[NAME]"):
+                                name_content = clean_text.replace("[NAME]", "").strip()
+                                match = re.match(r"^([^:]+:)(.*)$", name_content)
+                                if match:
+                                    name_part = match.group(1)   
+                                    dialogue_part = match.group(2) 
+                                    r_name = p_tag.add_run(name_part)
+                                    r_name.bold = True
+                                    p_tag.add_run(dialogue_part)
+                                else:
+                                    p_tag.add_run(name_content)
+                                    
+                            # 스타일링 3: 일반 본문 문장 구조 처리
+                            else:
+                                plain_content = clean_text.replace("**", "")
+                                p_tag.add_run(plain_content)
+                                        
+                        doc.add_page_break()
+                        
+                    except Exception as word_err:
+                        st.warning(f"⚠️ '{file.name}' 문서 서식 스타일링 적용 중 경미한 지연이 있습니다. 텍스트 추출은 유지됩니다.")
+                        continue
+                    
+                    # 💡 파일 간 간격 딜레이 리팩토링 (기존 6초 대기를 부드러운 스태거 방식으로 통합)
+                    if idx < total_files - 1:
+                        steps = 30 
+                        for step in range(steps):
+                            sec_left = 3 - (step // 10)
+                            status_text.text(f"⏳ 다음 지문으로 이동 중입니다.. ({sec_left}초)")
+                            time.sleep(0.1)
+
+            if success_count > 0:
+                if not quota_blocked:
+                    percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
+                    progress_bar.progress(100)
+                    status_text.text("🎉 모든 영어 지문이 성공적으로 변환되었습니다!")
+                else:
+                    status_text.text(f"⚠️ 구글 무료 한도로 인해 {success_count}개의 지문만 먼저 변환 완료되었습니다.")
+                
+                docx_buffer = BytesIO()
+                doc.save(docx_buffer)
+                docx_buffer.seek(0)
+                
+                st.markdown('<div class="status-box">', unsafe_allow_html=True)
+                st.download_button(
+                    label="📥 변환된 Word 파일 다운로드",
+                    data=docx_buffer,
+                    file_name="Converted_English_Texts.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.error("❌ 현재 구글 무료 서버의 접속량이 너무 많아 일시적으로 응답이 불가능합니다. 잠시 후 다시 시도해 주세요.")
+
+except KeyError:
+    st.error("🔒 설정 오류: Streamlit Secrets에 API Key를 등록해 주세요.")
