@@ -105,3 +105,4 @@ def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
             clean_text = response.text.strip()
             if clean_text.startswith("```"):
                 clean_text = re.sub(r"^
+http://googleusercontent.com/immersive_entry_chip/0
