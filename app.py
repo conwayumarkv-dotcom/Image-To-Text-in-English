@@ -88,7 +88,7 @@ st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_h
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
 st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
-# 🛠️ 비동기 API 처리를 담당하는 스레드 워커 함수
+# 🛠️ 비동기 API 처리를 담당하는 백그라운드 스레드 워커 함수
 def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
     max_retries = 3
     for attempt in range(max_retries):
@@ -101,7 +101,7 @@ def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
                 )
             )
             
-            # 구글 AI가 보낸 마크다운 래퍼(```json ... ```) 제거
+            # 구글 AI가 보낸 마크다운 코드 블록(```json ... ```)을 깨끗하게 슬라이싱 처리
             clean_text = response.text.strip()
             if clean_text.startswith("```"):
                 clean_text = re.sub(r"^
