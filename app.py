@@ -4,7 +4,7 @@ from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
 import re
-import threading  # 🛠️ Streamlit 리런 버그 및 한도 초과 차단을 위한 스레드 도입
+import threading
 from PIL import Image
 from google import genai
 from google.genai import types
@@ -87,7 +87,7 @@ st.markdown('<p class="main-title">Image To Text in English</p>', unsafe_allow_h
 st.markdown('<p class="sub-title">사진 속 지문을 인식하여 편집 가능한 워드 문서(.docx)로 변환합니다.</p>', unsafe_allow_html=True)
 st.markdown('<div class="author-footer">© TOP English Academy. All rights reserved.</div>', unsafe_allow_html=True)
 
-# 🛠️ 백그라운드에서 구글 API를 단 1번만 안전하게 호출하는 워커 함수 정의
+# 백그라운드 API 호출 워커 함수
 def gemini_api_worker(client, model_name, pil_image, prompt, result_container):
     max_retries = 3
     for attempt in range(max_retries):
@@ -136,7 +136,9 @@ try:
             status_text = st.empty()       
             
             total_files = len(uploaded_files)
-            model_name = 'gemini-2.5-flash'
+            
+            # 🛠️ [최종 버그 해결의 핵심] 복잡한 지문 분석 연산에 특화된 최고 사양 'pro' 모델로 업그레이드
+            model_name = 'gemini-2.5-pro'
             
             current_percent = 0
             success_count = 0     
@@ -168,17 +170,14 @@ try:
 
                 virtual_target = max(current_percent, real_target_percent - 3)
                 
-                # 🛠️ 스레드 통신용 컨테이너 생성
                 worker_result = {"status": "pending", "text": ""}
                 
-                # 🛠️ 비동기 스레드 생성 및 시작 (단어장 프로그램과 완전히 동일한 메커니즘 수립)
                 api_thread = threading.Thread(
                     target=gemini_api_worker,
                     args=(client, model_name, pil_image, prompt, worker_result)
                 )
                 api_thread.start()
                 
-                # 🛠️ AI가 스레드에서 돌아가는 동안 진행바를 부드럽게 선형 제어
                 ui_progress = float(current_percent)
                 while api_thread.is_alive():
                     if ui_progress < float(virtual_target):
@@ -189,7 +188,6 @@ try:
                         progress_bar.progress(int(ui_progress))
                     time.sleep(0.04)
                 
-                # 스레드 종료 후 결과 판정
                 if worker_result["status"] == "quota_error":
                     quota_blocked = True
                 elif worker_result["status"] == "fail":
