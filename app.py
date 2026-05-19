@@ -100,14 +100,15 @@ try:
             style._element.rPr.get_or_add_rFonts().set(qn('w:hAnsi'), 'Arial')
             style.font.size = Pt(11)
             
-            # AI 연산 대기 중임을 보여주는 스피너 박스 생성
-            with st.spinner("🚀 인공지능이 사진 속 영어 지문을 정밀하게 해독하고 문서로 빌드 중입니다... 잠시만 기다려주세요."):
+            # [문구 수정] 유저(선생님) 친화적인 로딩 스피너 메시지
+            with st.spinner("🚀 인공지능 교사가 사진 속 영어 지문을 정밀하게 읽고 분석하는 중입니다... 잠시만 기다려주세요."):
                 
                 total_files = len(uploaded_files)
                 model_name = 'gemini-2.5-flash'
                 
                 success_count = 0     
                 quota_blocked = False
+                api_error_occurred = False
                 last_extracted_text = "" 
                 
                 for idx, file in enumerate(uploaded_files):
@@ -156,7 +157,9 @@ try:
                             if any(x in error_msg for x in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT_EXCEEDED"]):
                                 quota_blocked = True
                                 break 
-                                
+                            
+                            # 일반적인 네트워크/접속 에러 체크
+                            api_error_occurred = True
                             if attempt < max_retries - 1:
                                 time.sleep(2)
                                 continue
@@ -213,32 +216,31 @@ try:
                         except Exception:
                             continue
 
-            # 2. 모든 내부 처리가 끝난 후 0%에서 100%까지 일정한 속도로 완벽하게 로딩 바 구현
+            # 2. 결과 출력 (0% ~ 100%까지 끊김 현상 없는 일정한 애니메이션)
             if success_count > 0:
                 percent_display = st.empty()  
                 progress_bar = st.progress(0)  
                 status_text = st.empty()       
 
-                # 전체 0.8초 동안 아주 부드럽고 균일하게 진행률 상승 (0% ~ 100%)
+                # 전체 대기 시간 없이 일정한 등속도로 바가 차오름
                 for p in range(0, 101):
                     if p == 100:
-                        percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
-                        status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 완성되었습니다!")
+                        percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 완료: 100%</p>', unsafe_allow_html=True)
+                        status_text.text("🎉 모든 영어 지문이 깨끗한 워드 파일 문서로 완성되었습니다!")
                     else:
-                        percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
-                        status_text.text("📝 문서를 패키징하고 다운로드 링크를 준비하는 중입니다...")
+                        percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
+                        status_text.text("📝 줄바꿈을 정렬하고 받아온 지문을 워드 문서에 넣는 중입니다...")
                     
                     progress_bar.progress(p / 100.0)
-                    time.sleep(0.008) # 균일한 속도 제어
+                    time.sleep(0.008) 
                 
                 if quota_blocked:
-                    st.warning("⚠️ 중간에 무료 한도가 초과되어, 현재까지 성공적으로 변환된 파일만 저장되었습니다.")
+                    st.warning("⚠️ 오늘 준비된 무료 인공지능 사용량이 도중에 마감되어, 읽어내는 데 성공한 지문들만 먼저 저장되었습니다.")
 
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
                 docx_buffer.seek(0)
                 
-                # 군더더기 박스 없이 깔끔하게 배치
                 st.download_button(
                     label="📥 변환된 Word 파일 다운로드",
                     data=docx_buffer,
@@ -246,10 +248,13 @@ try:
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
                 
+            # [문구 수정] 선생님들이 직관적으로 이해할 수 있는 한글 에러 처리 구조로 정제
             elif quota_blocked and success_count == 0:
-                st.error("⚠️ 오늘 구글의 하루 제공량을 모두 소진하여 더 이상 변환할 수 없습니다.")
+                st.error("⚠️ 오늘 제공되는 구글 인공지능의 하루 무료 한도를 모두 소진했습니다. 내일 다시 시도하시거나 유료 API 계정 전환이 필요합니다.")
+            elif api_error_occurred:
+                st.error("❌ 구글 인공지능 서버 연결이 원활하지 않습니다. 인터넷 연결을 확인하시거나 잠시 후 다시 시도해 주세요.")
             elif not last_extracted_text: 
-                st.error("❌ 변환된 지문이 없습니다. API 상태나 secrets 설정을 확인해 주세요.")
+                st.error("❌ 사진에서 영어 글자를 전혀 찾지 못했습니다. 사진이 흐리거나 어둡지 않은지 확인 후 다시 업로드해 주세요.")
 
 except KeyError:
-    st.error("🔒 설정 오류: Streamlit Secrets에 API Key를 등록해 주세요.")
+    st.error("🔒 설정 오류: 프로그램 관리자 설정(Streamlit Secrets)에 구글 인증키가 올바르게 등록되지 않았습니다.")
