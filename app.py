@@ -3,9 +3,10 @@ from docx import Document
 from docx.shared import Pt, RGBColor
 from io import BytesIO
 import time
-import re  # 🛠️ NameError(re) 예방을 위한 정규표현식 라이브러리
-from PIL import Image  # 🛠️ 이미지 압축 및 전처리를 위한 라이브러리
-import google.genai as genai  # 🛠️ NameError(genai)를 완벽하게 차단하는 명확한 임포트 방식
+import re
+from PIL import Image
+from google import genai
+from google.genai import types
 
 # 1. 페이지 기본 설정 및 디자인
 st.set_page_config(
@@ -110,15 +111,17 @@ try:
             status_text = st.empty()       
             
             total_files = len(uploaded_files)
-            model_name = 'gemini-2.5-flash'
-            success_count = 0     
             
-            current_ui_percent = 0  # 🛠️ 부드러운 전진을 위한 전역 퍼센트 추적기
+            # 🛠️ [핵심 조치] 하루 한도 20장 -> 1,500장으로 대폭 늘어나는 1.5-flash 모델 적용
+            model_name = 'gemini-1.5-flash'
+            
+            success_count = 0     
+            quota_blocked = False
             
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
                 
-                # 고용량 사진 데이터 최적화 전처리
+                # 고용량 사진 데이터 전처리 다이어트 유지
                 try:
                     raw_img = Image.open(BytesIO(file_bytes))
                     if raw_img.mode != 'RGB':
@@ -135,56 +138,57 @@ try:
                         st.error(f"❌ '{file.name}' 이미지를 로드하는 과정에서 에러가 발생했습니다.")
                         continue
                 
+                # 🛠️ 출력 텍스트 길이를 최소화하도록 프롬프트 다이어트
                 prompt = """
-                이 사진 속의 영어 지문 텍스트를 상식적이고 가독성 높은 문맥에 맞춰 추출해줘.
-                - 사진의 메인 제목이나 큰 단원 소제목이 있다면 텍스트 제일 앞에 '[HEADING]' 이라는 태그를 붙여줘. (예: [HEADING] Into a New World of Storytelling)
-                - 대화 내용 구조인 경우에만, 대화 주체 이름 뒤에 콜론(:)을 붙이고 이름 앞에 '[NAME]' 태그를 붙여줘. (예: [NAME] Mike: Hey, guys!)
-                
-                [⚠️ 중요 규칙: 가독성 및 줄바꿈 지시]
-                - 영어 원문 텍스트 중간이나 우측 가장자리에 적혀 있는 '5', '10', '15'와 같은 행 번호(Line Numbers) 표시는 지문 본문 단어와 꼬이지 않도록 완벽하게 무시하고 걷어내줘.
-                - 원본 사진의 줄바꿈을 억지로 따라 하지 마. 하나의 긴 단락(Paragraph)은 인위적으로 끊지 말고 쭉 이어서 하나의 유기적인 문단으로 합쳐서 완성해줘. 
-                - 오직 문맥상 새로운 이야기나 단락이 시작될 때만 자연스럽게 줄바꿈을 적용해줘.
-                - 본문 단어에 임의로 마크다운 별표(**)나 진하게 설정을 넣지 마. 오직 순수한 텍스트만 출력해줘.
-                - 결과물은 오직 추출된 텍스트만 보여주고, 다른 부연 설명은 하지 마.
+                Extract the English text from this image perfectly.
+                Rules:
+                - Add '[HEADING]' tag at the front of main titles.
+                - Add '[NAME]' tag before speaker names and a colon after (e.g., [NAME] Mike: ).
+                - Remove all line numbers (like 5, 10, 15) entirely.
+                - Do not follow the image's hard line breaks. Output as a continuous paragraph unless the context completely changes.
+                - No markdown (like **). Output ONLY the extracted text and nothing else.
                 """
                 
-                status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 깨끗하게 읽어오는 중입니다...")
+                status_text.text(f"⏳ [{idx+1}/{total_files}] '{file.name}' 사진 속 영어 지문을 분석 중입니다...")
                 
-                # 🛠️ [진행률 로직 개선] API 요청 전, 목표치 전까지 1%씩 아주 부드럽게 전진
+                current_percent = int((idx / total_files) * 100)
                 target_percent = int(((idx + 1) / total_files) * 100)
-                pre_target = max(current_ui_percent, target_percent - 5)
                 
-                for p in range(current_ui_percent, pre_target + 1):
+                for p in range(current_percent, min(target_percent, current_percent + 5)):
                     percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p)
                     time.sleep(0.02)
-                current_ui_percent = pre_target
 
-                # API 호출 수행
+                extracted_text = ""
+                
                 try:
+                    # 🛠️ temperature를 0.0으로 낮춰 AI의 불필요한 토큰 낭비 연산 억제
                     response = client.models.generate_content(
                         model=model_name,
-                        contents=[pil_image, prompt]
+                        contents=[pil_image, prompt],
+                        config=types.GenerateContentConfig(temperature=0.0)
                     )
                     extracted_text = response.text
                 except Exception as api_err:
-                    st.error(f"❌ '{file.name}' 구글 서버 연동 중 오류가 발생했습니다: {str(api_err)}")
-                    continue
+                    error_msg = str(api_err).upper()
+                    if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "QUOTA" in error_msg:
+                        quota_blocked = True
+                        break 
+                    else:
+                        st.error(f"❌ '{file.name}' 구글 서버 연동 중 일시적 오류가 발생했습니다.")
+                        continue
 
                 if extracted_text:
                     try:
                         success_count += 1
                         
-                        # 🛠️ [진행률 로직 개선] API 성공 시, 나머지 퍼센트를 촘촘하게 채워 점프 현상 완전 차단
-                        for p in range(current_ui_percent, target_percent + 1):
+                        for p in range(min(target_percent, current_percent + 5), target_percent + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
                             time.sleep(0.01)
                         
-                        current_ui_percent = target_percent
                         status_text.text(f"✅ [{idx+1}/{total_files}] 지문 변환 및 서식 정리 완료!")
                         
-                        # 사진 출처 표기 서식
                         p_src = doc.add_paragraph()
                         r_src = p_src.add_run(f"▪ Source: {file.name}")
                         r_src.font.size = Pt(10)
@@ -198,7 +202,6 @@ try:
                             
                             p_tag = doc.add_paragraph()
                             
-                            # 스타일링 1: 소제목/제목 구조 처리
                             if clean_text.startswith("[HEADING]"):
                                 heading_content = clean_text.replace("[HEADING]", "").strip()
                                 run = p_tag.add_run(heading_content)
@@ -207,7 +210,6 @@ try:
                                 p_tag.paragraph_format.space_before = Pt(12) 
                                 p_tag.paragraph_format.space_after = Pt(6)   
                                 
-                            # 스타일링 2: 대화문 주체 구조 처리
                             elif clean_text.startswith("[NAME]"):
                                 name_content = clean_text.replace("[NAME]", "").strip()
                                 match = re.match(r"^([^:]+:)(.*)$", name_content)
@@ -220,26 +222,26 @@ try:
                                 else:
                                     p_tag.add_run(name_content)
                                     
-                            # 스타일링 3: 일반 본문 문장 구조 처리
                             else:
                                 plain_content = clean_text.replace("**", "")
                                 p_tag.add_run(plain_content)
                                         
                         doc.add_page_break()
                         
-                    except Exception:
+                    except Exception as word_err:
                         st.warning(f"⚠️ '{file.name}' 문서 디자인 조립 중 경미한 지연이 생겨 안전하게 다음으로 패스합니다.")
                         continue
                     
-                    # 연속 요청 간격을 주어 트래픽 안정성 확보
                     if idx < total_files - 1:
-                        time.sleep(0.8)
+                        time.sleep(1.0)
 
             if success_count > 0:
-                # 🛠️ 최종 100% 도달 보장
-                percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
-                progress_bar.progress(100)
-                status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 완성되었습니다!")
+                if quota_blocked:
+                    st.warning("⚠️ 하루 무료 제공량이 모두 소진되어 작업이 중단되었습니다. 현재까지 성공적으로 변환된 파일만 저장합니다.")
+                else:
+                    percent_display.markdown('<p class="percent-text" style="color:#0D9488;">🎉 변환 진행률: 100%</p>', unsafe_allow_html=True)
+                    progress_bar.progress(100)
+                    status_text.text("🎉 선택하신 모든 영어 지문이 워드 파일로 완성되었습니다!")
                 
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
@@ -253,9 +255,13 @@ try:
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
                 st.markdown('</div>', unsafe_allow_html=True)
+                
+            elif quota_blocked and success_count == 0:
+                status_text.empty()
+                st.error("⚠️ 오늘 구글의 하루 제공량(1,500장)을 모두 소진하여 내일 다시 이용해야 합니다.")
             else:
                 status_text.empty()
-                st.error("❌ 변환된 지문이 없습니다. 파일 상태나 API Key 설정을 확인해 주세요.")
+                st.error("❌ 변환된 지문이 없습니다. 파일 상태를 확인해 주세요.")
 
 except KeyError:
     st.error("🔒 설정 오류: Streamlit Secrets에 API Key를 등록해 주세요.")
