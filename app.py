@@ -8,14 +8,13 @@ import re
 from PIL import Image, ImageOps
 from google import genai
 
-# 1. 페이지 기본 설정 및 디자인
+# 1. 페이지 기본 설정 및 학원 스타일 테마 디자인
 st.set_page_config(
     page_title="Image To Text in English",
     page_icon="📝",
     layout="centered"
 )
 
-# 세련되고 직관적인 커스텀 CSS
 st.markdown("""
     <style>
     .stApp { background-color: #FDFBF6; }
@@ -99,16 +98,17 @@ try:
             style._element.rPr.get_or_add_rFonts().set(qn('w:hAnsi'), 'Arial')
             style.font.size = Pt(11)
             
-            # 진행바 즉시 배치
+            # 레이아웃 UI 요소 배치 (버튼 클릭 즉시 활성화)
             percent_display = st.empty()  
             progress_bar = st.progress(0)  
             status_text = st.empty()       
             
             percent_display.markdown('<p class="percent-text">⏳ 문서 생성률: 0%</p>', unsafe_allow_html=True)
             progress_bar.progress(0.0)
-            status_text.text("🔄 인공지능 교사가 지문 판독을 시작합니다. 잠시만 기다려주세요...")
+            status_text.text("🔄 인공지능 교사가 지문 판독 준비를 완료했습니다.")
             
             total_files = len(uploaded_files)
+            # [수정] 가장 오류가 없고 무료 서빙률이 높은 가볍고 빠른 최신 표준 컴팩트 노드 적용
             model_name = 'gemini-2.0-flash'
             
             success_count = 0     
@@ -116,33 +116,34 @@ try:
             api_error_occurred = False
             last_extracted_text = "" 
             
+            # 균일한 등속 게이지 전진을 위한 계산식
             progress_per_file = 100.0 / total_files
             
             for idx, file in enumerate(uploaded_files):
                 file_bytes = file.read()
                 extracted_text = "" 
                 
-                # 무료 계정 우회를 위한 필수 대기 장치 (두 번째 사진부터 10초씩 안정적으로 대기)
+                # [구글 RPM 우회 조치] 연속 처리 시 차단되는 것을 방지하기 위해 사진당 3초씩 안전 간격 확보
                 if idx > 0:
-                    for wait_sec in range(10, 0, -1):
-                        status_text.text(f"⏳ 구글 서버 안정화 대기 중... ({wait_sec}초 남음)")
+                    for remaining in range(3, 0, -1):
+                        status_text.text(f"⏳ 구글 서버 과부하 방지를 위해 안전 대기 중... ({remaining}초)")
                         time.sleep(1)
                 
                 start_p = int(idx * progress_per_file)
                 mid_p = int((idx + 0.6) * progress_per_file)
                 end_p = int((idx + 1) * progress_per_file)
                 
-                status_text.text(f"📝 [{idx+1}/{total_files}] '{file.name}' 파일을 읽어오는 중입니다...")
+                status_text.text(f"📝 [{idx+1}/{total_files}] '{file.name}' 사진 데이터 압축 중...")
                 for p in range(start_p, min(mid_p, 99) + 1):
                     percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p / 100.0)
                     time.sleep(0.01)
                 
                 try:
-                    # [토큰 다이어트 1] 해상도를 낮추고 명암(흑백)을 최적화하여 픽셀 정보 토큰 최소화
+                    # [토큰 최소화 1] 사진 흑백화 및 해상도 다이어트(최소화)로 인풋 트래픽 최적화
                     raw_img = Image.open(BytesIO(file_bytes))
-                    raw_img = ImageOps.grayscale(raw_img) # 흑백 변환
-                    raw_img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+                    raw_img = ImageOps.grayscale(raw_img)
+                    raw_img.thumbnail((750, 750), Image.Resampling.LANCZOS)
                     
                     compressed_buffer = BytesIO()
                     raw_img.save(compressed_buffer, format="JPEG", quality=70)
@@ -153,11 +154,11 @@ try:
                     except Exception:
                         continue
                 
-                # [토큰 다이어트 2] 지시 프롬프트를 최소 단어 위주로 극단적 압축
+                # [토큰 최소화 2] 텍스트만 바로 뽑도록 프롬프트 초경량 요약
                 prompt = """
                 Extract English text from image.
                 - Add '[HEADING]' before titles.
-                - Add '[NAME]' before speaker names.
+                - Add '[NAME]' before speakers.
                 - Delete all line numbers.
                 - Keep paragraphs continuous.
                 - No markdown.
@@ -166,22 +167,27 @@ try:
                 status_text.text(f"🤖 [{idx+1}/{total_files}] 인공지능 교사가 지문을 깨끗하게 정렬하는 중입니다...")
                 
                 try:
-                    # 토큰 효율화를 위해 config 파라미터를 덜어내고 핵심만 호출
+                    # 중복 호출 메커니즘을 걷어내고 단 한 번만 서빙하도록 변경하여 한도 폭탄 제거
                     response = client.models.generate_content(
                         model=model_name,
                         contents=[pil_image, prompt]
                     )
-                    extracted_text = response.text
-                    last_extracted_text = extracted_text
+                    if response and response.text:
+                        extracted_text = response.text
+                        last_extracted_text = extracted_text
                     
                 except Exception as api_err:
                     error_msg = str(api_err).upper()
+                    # 한도 소진 및 서버 제한 감지 시 즉시 브레이크를 걸어 안전 보호
                     if any(x in error_msg for x in ["429", "RESOURCE_EXHAUSTED", "QUOTA", "LIMIT_EXCEEDED"]):
                         quota_blocked = True
                         break 
                     else:
                         api_error_occurred = True
                         break
+
+                if quota_blocked or api_error_occurred:
+                    break
 
                 if extracted_text:
                     try:
@@ -230,12 +236,13 @@ try:
                     except Exception:
                         continue
                 
+                # 한 장 완료 후 다음 장으로 가기 전 부드러운 진행바 애니메이션 채우기
                 for p in range(mid_p + 1, min(end_p, 99) + 1):
                     percent_display.markdown(f'<p class="percent-text">⏳ 문서 생성률: {p}%</p>', unsafe_allow_html=True)
                     progress_bar.progress(p / 100.0)
                     time.sleep(0.01)
 
-            # 3. 결과 출력 및 완료 연출
+            # 3. 결과 도출 및 성공 피드백 연출
             if success_count > 0:
                 current_p = int(progress_bar.progress) if hasattr(progress_bar, 'progress') else 90
                 for p in range(current_p, 101):
@@ -247,7 +254,7 @@ try:
                 status_text.text("🎉 모든 영어 지문이 깨끗한 워드 파일 문서로 완성되었습니다!")
                 
                 if quota_blocked:
-                    st.warning("⚠️ 무료 사용 한도로 인해 일부 지문만 정렬되었습니다. 잠시 후 다시 시도해 주세요.")
+                    st.warning("⚠️ 구글 서버 트래픽 감지로 인해 변환이 완료된 지문까지만 먼저 정렬되었습니다.")
 
                 docx_buffer = BytesIO()
                 doc.save(docx_buffer)
@@ -263,15 +270,15 @@ try:
             elif quota_blocked and success_count == 0:
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("⚠️ 구글 무료 한도가 초과되었습니다. 1~2분 뒤에 페이지를 새로고침하여 다시 실행해 주세요.")
+                st.error("⚠️ 구글 API 무료 요청 빈도 제한에 걸렸습니다. 약 1분간 대기 후 변환 버튼을 다시 눌러주세요.")
             elif api_error_occurred:
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("❌ 통신 제한이 발생했습니다. 안전 장치가 보강되었으니 다시 시도해 주세요.")
+                st.error("❌ 구글 서버 내부 통신 오류가 발생했습니다. 잠시 후 재시도해 주세요.")
             elif not last_extracted_text: 
                 percent_display.empty()
                 progress_bar.empty()
-                st.error("❌ 사진 속에서 텍스트를 감지하지 못했습니다. 이미지 상태를 확인해 주세요.")
+                st.error("❌ 사진 속 글자가 희미하여 판독을 실패했습니다. 더 밝고 선명한 사진으로 시도해 주세요.")
 
 except KeyError:
     st.error("🔒 설정 오류: 프로그램 관리자 설정(Streamlit Secrets)에 구글 인증키가 올바르게 등록되지 않았습니다.")
