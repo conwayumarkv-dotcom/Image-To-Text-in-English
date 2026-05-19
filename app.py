@@ -147,12 +147,11 @@ try:
                 
                 for attempt in range(max_retries):
                     try:
-                        # 🛠️ [결정적 버그 수정] Google GenAI SDK 표준 이미지 바이트 딕셔너리 포맷으로 변경
-                        # 기존 types.Part.from_bytes 규격 오류로 인한 API 강제 에러 드랍 차단
-                        image_part = {
-                            "mime_type": file.type,
-                            "data": image_bytes
-                        }
+                        # 🛠️ [Pydantic 에러 해결] 최신 google-genai 규격에 맞춰 types.Part 형식을 정확히 지정
+                        image_part = types.Part.from_bytes(
+                            data=image_bytes,
+                            mime_type=file.type
+                        )
                         
                         response = client.models.generate_content(
                             model=model_name,
@@ -161,6 +160,7 @@ try:
                         
                         extracted_text = response.text
                         
+                        # 연산 진행률 연출용 루프
                         for p in range(current_percent, virtual_target + 1):
                             percent_display.markdown(f'<p class="percent-text">⏳ 변환 진행률: {p}%</p>', unsafe_allow_html=True)
                             progress_bar.progress(p)
